@@ -55,6 +55,11 @@ def create_document(
     return document
 
 
+@app.get("/api/documents", response_model=list[schemas.DocumentRead])
+def list_documents(db: Session = Depends(get_db)) -> list[models.Document]:
+    return db.query(models.Document).order_by(models.Document.created_at.desc(), models.Document.id.desc()).all()
+
+
 @app.get("/api/documents/{document_id}", response_model=schemas.DocumentRead)
 def get_document(document_id: int, db: Session = Depends(get_db)) -> models.Document:
     return require_document(db, document_id)
@@ -97,28 +102,21 @@ def update_section(
 
 
 @app.post("/api/documents/{document_id}/extract-rules", response_model=schemas.ExtractRulesResponse)
-def extract_document_rules(document_id: int, db: Session = Depends(get_db)) -> schemas.ExtractRulesResponse:
+def extract_document_rules(
+    document_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> schemas.ExtractRulesResponse:
     document = require_document(db, document_id)
     if not document.sections:
         raise HTTPException(status_code=409, detail="Document has no Markdown sections to extract from.")
-    try:
-        document.status = "classifying_sections"
-        db.commit()
-        llm = DoubaoClient()
-        classify_sections(db, document, llm)
-        document.status = "extracting_rules"
-        db.commit()
-        rules_created = extract_rules(db, document, llm)
-        return schemas.ExtractRulesResponse(
-            document_id=document.id, status=document.status, rules_created=rules_created
-        )
-    except (LLMError, Exception) as exc:
-        document.status = "rule_extraction_failed"
-        document.error_message = str(exc)
-        db.commit()
-        if isinstance(exc, LLMError):
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        raise
+    document.status = "rule_extraction_queued"
+    document.error_message = None
+    db.commit()
+    background_tasks.add_task(run_rule_extraction_pipeline, document.id)
+    return schemas.ExtractRulesResponse(
+        document_id=document.id, status=document.status, rules_created=0
+    )
 
 
 @app.get("/api/documents/{document_id}/rules", response_model=list[schemas.RuleRead])
@@ -218,6 +216,29 @@ def run_mineru_pipeline(document_id: int) -> None:
         document = db.query(models.Document).filter(models.Document.id == document_id).first()
         if document:
             document.status = "mineru_failed"
+            document.error_message = str(exc)
+            db.commit()
+    finally:
+        db.close()
+
+
+def run_rule_extraction_pipeline(document_id: int) -> None:
+    db = SessionLocal()
+    try:
+        document = require_document(db, document_id)
+        document.status = "classifying_sections"
+        document.error_message = None
+        db.commit()
+
+        llm = DoubaoClient()
+        classify_sections(db, document, llm)
+        document.status = "extracting_rules"
+        db.commit()
+        extract_rules(db, document, llm)
+    except (LLMError, Exception) as exc:
+        document = db.query(models.Document).filter(models.Document.id == document_id).first()
+        if document:
+            document.status = "rule_extraction_failed"
             document.error_message = str(exc)
             db.commit()
     finally:

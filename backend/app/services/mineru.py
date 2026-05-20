@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import subprocess
 import time
 from dataclasses import dataclass
+from tempfile import NamedTemporaryFile
 
 import requests
 
@@ -87,7 +89,26 @@ class MinerUClient:
             except requests.RequestException as exc:
                 last_error = exc
                 time.sleep(settings.mineru_download_retry_delay_seconds)
-        raise MinerUError(f"Failed to download MinerU zip: {last_error}")
+        try:
+            return self._download_zip_with_curl(zip_url)
+        except Exception as curl_error:
+            raise MinerUError(
+                f"Failed to download MinerU zip: {last_error}; curl fallback failed: {curl_error}"
+            ) from curl_error
+
+    @staticmethod
+    def _download_zip_with_curl(zip_url: str) -> bytes:
+        with NamedTemporaryFile(suffix=".zip") as tmp:
+            completed = subprocess.run(
+                ["curl", "-L", "--fail", "--silent", "--show-error", "-o", tmp.name, zip_url],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if completed.returncode != 0:
+                raise MinerUError(completed.stderr.strip() or "curl returned a non-zero exit code")
+            tmp.seek(0)
+            return tmp.read()
 
     @staticmethod
     def _extract_zip_url(data: dict) -> str:

@@ -14,6 +14,7 @@ import {
   createDocument,
   extractRules,
   getDocument,
+  getDocuments,
   getOutline,
   getRuleGraph,
   getRules,
@@ -32,6 +33,16 @@ export function App() {
   const [graph, setGraph] = useState<RuleGraph>({ nodes: [], edges: [] });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    getDocuments()
+      .then((documents) => {
+        if (documents.length) {
+          setDocumentJob(documents[0]);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     if (!documentJob || TERMINAL_STATUSES.has(documentJob.status)) {

@@ -23,6 +23,10 @@ export function createDocument(payload: {
   });
 }
 
+export function getDocuments() {
+  return request<DocumentJob[]>("/api/documents");
+}
+
 export function getDocument(id: number) {
   return request<DocumentJob>(`/api/documents/${id}`);
 }

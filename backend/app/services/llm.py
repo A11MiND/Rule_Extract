@@ -28,6 +28,8 @@ class DoubaoClient:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0,
+            "max_tokens": 4096,
+            "thinking": {"type": "disabled"},
             "response_format": {"type": "json_object"},
         }
         response = requests.post(
