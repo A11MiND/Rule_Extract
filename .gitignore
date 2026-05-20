@@ -1,0 +1,15 @@
+.DS_Store
+.claude/
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+node_modules/
+dist/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/nec4_poc.db
+storage/documents/
+storage/uploads/
+storage/raw/
