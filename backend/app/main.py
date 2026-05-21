@@ -400,6 +400,7 @@ def run_mineru_pipeline(document_id: int) -> None:
         document.status = "markdown_ready"
         db.commit()
     except (MinerUError, Exception) as exc:
+        db.rollback()
         document = db.query(models.Document).filter(models.Document.id == document_id).first()
         if document:
             document.status = "mineru_failed"
@@ -452,7 +453,7 @@ def persist_sections_from_artifacts(
     for section in parsed_sections:
         db.add(
             models.Section(
-                id=section.id,
+                id=scoped_section_id(document.id, section.id),
                 document_id=document.id,
                 position=section.position,
                 level=section.level,
@@ -462,6 +463,11 @@ def persist_sections_from_artifacts(
             )
         )
     db.commit()
+
+
+def scoped_section_id(document_id: int, section_id: str) -> str:
+    prefix = f"doc-{document_id}-"
+    return section_id if section_id.startswith(prefix) else f"{prefix}{section_id}"
 
 
 def persist_sections_from_markdown(db: Session, document: models.Document, markdown: str) -> None:
