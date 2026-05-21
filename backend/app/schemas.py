@@ -40,6 +40,29 @@ class DocumentRead(BaseModel):
     artifact_manifest: dict[str, Any] = Field(default_factory=dict)
 
 
+class RuntimeConfigUpdate(BaseModel):
+    mineru_api_base: str | None = None
+    mineru_api_token: str | None = None
+    mineru_model_version: str | None = None
+    llm_provider: str | None = None
+    llm_api_base: str | None = None
+    llm_api_key: str | None = None
+    llm_model: str | None = None
+    llm_concurrency: int | None = Field(default=None, ge=1, le=20)
+
+
+class RuntimeConfigRead(BaseModel):
+    mineru_api_base: str
+    mineru_model_version: str
+    mineru_configured: bool
+    llm_provider: str
+    llm_api_base: str
+    llm_model: str
+    llm_configured: bool
+    llm_concurrency: int
+    max_llm_concurrency: int
+
+
 class SectionRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -126,6 +149,22 @@ class GraphEdge(BaseModel):
 class RuleGraph(BaseModel):
     nodes: list[GraphNode]
     edges: list[GraphEdge]
+
+
+class DocumentStats(BaseModel):
+    total_sections: int = 0
+    classified_sections: int = 0
+    candidate_sections: int = 0
+    llm_windows_completed: int = 0
+    llm_windows_total: int = 0
+    rules_extracted: int = 0
+    option_rules: int = 0
+    dependency_links: int = 0
+    low_confidence_rules: int = 0
+    reviewed_rules: int = 0
+    draft_rules: int = 0
+    rejected_rules: int = 0
+    partial_failures: int = 0
 
 
 class ExtractRulesResponse(BaseModel):

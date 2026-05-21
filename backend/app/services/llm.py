@@ -13,25 +13,23 @@ class LLMError(RuntimeError):
     pass
 
 
-class DoubaoClient:
-    def __init__(self, api_base: str | None = None, api_key: str | None = None) -> None:
+class LLMClient:
+    def __init__(
+        self,
+        api_base: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        provider: str = "OpenAI-compatible",
+    ) -> None:
         self.api_base = (api_base or settings.llm_api_base).rstrip("/")
         self.api_key = api_key if api_key is not None else settings.llm_api_key
+        self.model = model or settings.llm_model
+        self.provider = provider or "OpenAI-compatible"
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         if not self.api_key:
-            raise LLMError("LLM_API_KEY is required for real Doubao extraction.")
-        payload = {
-            "model": settings.llm_model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0,
-            "max_tokens": 4096,
-            "thinking": {"type": "disabled"},
-            "response_format": {"type": "json_object"},
-        }
+            raise LLMError("LLM API key is required for real rule extraction.")
+        payload = self.build_chat_payload(system_prompt, user_prompt)
         response = requests.post(
             f"{self.api_base}/chat/completions",
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
@@ -42,6 +40,21 @@ class DoubaoClient:
         data = response.json()
         content = data["choices"][0]["message"]["content"]
         return parse_json_content(content)
+
+    def build_chat_payload(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0,
+            "max_tokens": 4096,
+            "response_format": {"type": "json_object"},
+        }
+
+
+DoubaoClient = LLMClient
 
 
 def parse_json_content(content: str) -> dict[str, Any]:

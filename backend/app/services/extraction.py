@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 import hashlib
 import re
 from typing import Any
@@ -7,14 +10,16 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from .. import models
+from ..runtime_config import clamp_concurrency
 from ..schemas import RuleBase
-from .llm import DoubaoClient
+from .artifacts import document_storage_dir
+from .llm import LLMClient, LLMError
 
 
 CLASSIFY_SYSTEM_PROMPT = """You classify sections from NEC public works Practice Notes.
 Return JSON only with key sections. sections must be an array.
 Each item must include id, classification, confidence, reason.
-classification must be one of: background, definition, rule_candidate, mixed."""
+classification must be one of: background, definition, rule_candidate, option_logic, mixed, table_only."""
 
 EXTRACT_SYSTEM_PROMPT = """You extract evidence-backed rules from NEC public works Practice Notes.
 Return JSON only with key rules. rules must be an array.
@@ -24,7 +29,9 @@ Use only the provided text. If text is background, return an empty rules array.
 Use type from obligation, prohibition, permission, definition, procedure, deadline, option,
 checklist, background."""
 
-DEMO_MAX_EXTRACTION_SECTIONS = 24
+EXTRACTION_BATCH_SIZE = 3
+CLASSIFICATION_BATCH_SIZE = 12
+MAX_PROMPT_CHARS_PER_SECTION = 2200
 VALID_RULE_TYPES = {
     "obligation",
     "prohibition",
@@ -45,13 +52,62 @@ TYPE_ALIASES = {
 }
 
 
-def classify_sections(db: Session, document: models.Document, llm: DoubaoClient) -> None:
-    for section in document.sections:
-        section.classification, section.classification_confidence = classify_section_heuristic(section)
+def classify_sections(
+    db: Session,
+    document: models.Document,
+    llm: LLMClient,
+    concurrency: int = 8,
+) -> None:
+    sections = list(document.sections)
+    for batch_index, batch in enumerate(chunked(sections, CLASSIFICATION_BATCH_SIZE), start=1):
+        prompt = build_classification_prompt(batch)
+        entry: dict[str, Any] = {
+            "kind": "classification",
+            "batch_index": batch_index,
+            "section_ids": [section.id for section in batch],
+            "prompt": prompt,
+            "status": "completed",
+        }
+        try:
+            result = llm.complete_json(CLASSIFY_SYSTEM_PROMPT, prompt)
+            entry["response"] = result
+            by_id = {
+                item.get("id"): item
+                for item in result.get("sections", [])
+                if isinstance(item, dict)
+            }
+            for section in batch:
+                item = by_id.get(section.id) or {}
+                classification = str(item.get("classification") or "")
+                if classification not in {
+                    "background",
+                    "definition",
+                    "rule_candidate",
+                    "option_logic",
+                    "mixed",
+                    "table_only",
+                }:
+                    classification, confidence = classify_section_heuristic(section)
+                else:
+                    confidence = coerce_confidence(item.get("confidence"))
+                section.classification = classification
+                section.classification_confidence = confidence
+        except Exception as exc:
+            entry["status"] = "failed"
+            entry["error"] = str(exc)
+            for section in batch:
+                section.classification, section.classification_confidence = classify_section_heuristic(section)
+        append_llm_window_log(document.id, entry)
+        update_window_progress(db, document, completed_delta=1)
     db.commit()
 
 
-def extract_rules(db: Session, document: models.Document, llm: DoubaoClient) -> int:
+def extract_rules(
+    db: Session,
+    document: models.Document,
+    llm: LLMClient,
+    concurrency: int = 8,
+) -> int:
     definitions = "\n\n".join(
         f"{' > '.join(section.heading_path)}\n{section.content}"
         for section in document.sections
@@ -64,22 +120,84 @@ def extract_rules(db: Session, document: models.Document, llm: DoubaoClient) -> 
     candidate_sections = [
         section
         for section in document.sections
-        if section.classification != "background" and section.content.strip()
-    ][:DEMO_MAX_EXTRACTION_SECTIONS]
-    for batch in chunked(candidate_sections, 3):
-        section_by_id = {section.id: section for section in batch}
-        prompt = build_extraction_prompt(batch, definitions)
-        result = llm.complete_json(EXTRACT_SYSTEM_PROMPT, prompt)
-        for raw in result.get("rules", []):
-            if isinstance(raw, dict):
-                source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
-                section_id = source.get("section_id") or raw.get("section_id")
-                section = section_by_id.get(section_id) or batch[0]
-                saved += save_rule_if_new(db, document, normalize_rule(raw, document.id, section))
+        if section.classification not in {"background", "table_only"} and section.content.strip()
+    ]
+    batches = chunked(candidate_sections, EXTRACTION_BATCH_SIZE)
+    set_window_totals(db, document, total=len(batches))
+    if not batches:
+        document.status = "rules_extracted"
+        db.commit()
+        return 0
+
+    max_workers = clamp_concurrency(concurrency)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(extract_rule_window, llm, batch, definitions, index): (index, batch)
+            for index, batch in enumerate(batches, start=1)
+        }
+        for future in as_completed(futures):
+            index, batch = futures[future]
+            section_by_id = {section.id: section for section in batch}
+            try:
+                result, entry = future.result()
+            except Exception as exc:
+                entry = {
+                    "kind": "extraction",
+                    "batch_index": index,
+                    "section_ids": [section.id for section in batch],
+                    "status": "failed",
+                    "error": str(exc),
+                }
+                append_llm_window_log(document.id, entry)
+                update_window_progress(db, document, completed_delta=1, failure_delta=1)
+                continue
+            append_llm_window_log(document.id, entry)
+            update_window_progress(db, document, completed_delta=1)
+            for raw in result.get("rules", []):
+                if isinstance(raw, dict):
+                    source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
+                    section_id = source.get("section_id") or raw.get("section_id")
+                    section = section_by_id.get(section_id) or batch[0]
+                    saved += save_rule_if_new(db, document, normalize_rule(raw, document.id, section))
 
     document.status = "rules_extracted"
     db.commit()
     return saved
+
+
+def extract_rule_window(
+    llm: LLMClient,
+    batch: list[models.Section],
+    definitions: str,
+    batch_index: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    prompt = build_extraction_prompt(batch, definitions)
+    result = llm.complete_json(EXTRACT_SYSTEM_PROMPT, prompt)
+    entry = {
+        "kind": "extraction",
+        "batch_index": batch_index,
+        "section_ids": [section.id for section in batch],
+        "prompt": prompt,
+        "response": result,
+        "status": "completed",
+    }
+    return result, entry
+
+
+def build_classification_prompt(sections: list[models.Section]) -> str:
+    return (
+        "Classify the following sections for rule extraction. Return JSON only: "
+        '{"sections":[{"id":"...","classification":"rule_candidate","confidence":0.8,"reason":"..."}]}.\n\n'
+        + "\n\n".join(
+            (
+                f"SECTION_ID: {section.id}\n"
+                f"HEADING_PATH: {' > '.join(section.heading_path)}\n"
+                f"DETECTED_REFERENCES: {', '.join(detect_references(section.content)) or '(none)'}\n"
+                f"TEXT:\n{section.content[:900]}"
+            )
+            for section in sections
+        )
+    )
 
 
 def build_extraction_prompt(sections: list[models.Section], definitions: str) -> str:
@@ -91,7 +209,8 @@ def build_extraction_prompt(sections: list[models.Section], definitions: str) ->
             (
                 f"SECTION_ID: {section.id}\n"
                 f"HEADING_PATH: {' > '.join(section.heading_path)}\n"
-                f"TEXT:\n{section.content[:1800]}"
+                f"DETECTED_REFERENCES: {', '.join(detect_references(section.content)) or '(none)'}\n"
+                f"TEXT:\n{section.content[:MAX_PROMPT_CHARS_PER_SECTION]}"
             )
             for section in sections
         )
@@ -104,6 +223,62 @@ def build_extraction_prompt(sections: list[models.Section], definitions: str) ->
         " review_status must be draft."
         " For option branches, populate options and next_rule_ids only when the text supports them."
     )
+
+
+def append_llm_window_log(document_id: int, entry: dict[str, Any]) -> None:
+    path = llm_windows_path(document_id)
+    safe_entry = sanitize_export(entry)
+    safe_entry["timestamp"] = datetime.now(timezone.utc).isoformat()
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(safe_entry, ensure_ascii=False) + "\n")
+
+
+def llm_windows_path(document_id: int) -> str:
+    return str(document_storage_dir(document_id) / "llm_windows.jsonl")
+
+
+def update_window_progress(
+    db: Session,
+    document: models.Document,
+    completed_delta: int = 0,
+    failure_delta: int = 0,
+) -> None:
+    manifest = dict(document.artifact_manifest or {})
+    manifest["llm_windows_completed"] = int(manifest.get("llm_windows_completed") or 0) + completed_delta
+    manifest["llm_window_failures"] = int(manifest.get("llm_window_failures") or 0) + failure_delta
+    manifest["llm_windows_path"] = llm_windows_path(document.id)
+    document.artifact_manifest = manifest
+    db.commit()
+
+
+def set_window_totals(db: Session, document: models.Document, total: int) -> None:
+    manifest = dict(document.artifact_manifest or {})
+    manifest["llm_windows_total"] = total
+    manifest["llm_windows_completed"] = 0
+    manifest["llm_window_failures"] = 0
+    manifest["llm_windows_path"] = llm_windows_path(document.id)
+    document.artifact_manifest = manifest
+    db.commit()
+
+
+def sanitize_export(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: ("***REDACTED***" if "key" in key.lower() or "token" in key.lower() else sanitize_export(item))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [sanitize_export(item) for item in value]
+    return value
+
+
+def detect_references(text: str) -> list[str]:
+    refs = re.findall(r"(?:Section\s+)?((?:[A-Z]\d+|\d+)(?:\.\d+){1,5})", text)
+    seen: list[str] = []
+    for ref in refs:
+        if ref not in seen:
+            seen.append(ref)
+    return seen[:20]
 
 
 def normalize_rule(raw: dict[str, Any], document_id: int, section: models.Section) -> dict[str, Any]:

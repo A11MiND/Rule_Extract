@@ -4,43 +4,71 @@ import {
   CheckCircle2,
   ChevronRight,
   Check,
+  Download,
   Edit3,
   FileText,
   GitBranch,
   Loader2,
   Play,
   Save,
-  SearchCheck
+  SearchCheck,
+  Settings
 } from "lucide-react";
 import {
   createDocument,
   extractRules,
+  exportUrl,
   getDocument,
+  getDocumentStats,
   getDocuments,
   getOutline,
   getRuleGraph,
   getRules,
+  getRuntimeConfig,
   saveRule,
+  saveRuntimeConfig,
   saveSection
 } from "./api";
-import type { ContractFamily, DocumentJob, Rule, RuleGraph, Section } from "./types";
+import type {
+  ContractFamily,
+  DocumentJob,
+  DocumentStats,
+  Rule,
+  RuleGraph,
+  RuntimeConfig,
+  RuntimeConfigUpdate,
+  Section
+} from "./types";
 
-const READY_STATUSES = new Set(["markdown_ready", "classifying_sections", "extracting_rules", "rules_extracted"]);
+const READY_STATUSES = new Set([
+  "markdown_ready",
+  "rule_extraction_queued",
+  "classifying_sections",
+  "extracting_rules",
+  "rules_extracted"
+]);
 const TERMINAL_STATUSES = new Set(["mineru_failed", "rule_extraction_failed", "rules_extracted"]);
+const VIEWS = ["import", "processing", "review", "rules", "map"] as const;
+type View = (typeof VIEWS)[number];
 
 export function App() {
   const [documentJob, setDocumentJob] = useState<DocumentJob | null>(null);
+  const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig | null>(null);
+  const [stats, setStats] = useState<DocumentStats | null>(null);
   const [sections, setSections] = useState<Section[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
   const [graph, setGraph] = useState<RuleGraph>({ nodes: [], edges: [] });
+  const [activeView, setActiveView] = useState<View>("import");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    getRuntimeConfig().then(setRuntimeConfig).catch(() => undefined);
     getDocuments()
       .then((documents) => {
         if (documents.length) {
           setDocumentJob(documents[0]);
+          setActiveView("processing");
         }
       })
       .catch(() => undefined);
@@ -66,10 +94,44 @@ export function App() {
     if (!documentJob || !READY_STATUSES.has(documentJob.status)) {
       return;
     }
-    getOutline(documentJob.id).then(setSections).catch((err) => setError(err.message));
-    getRules(documentJob.id).then(setRules).catch(() => setRules([]));
-    getRuleGraph(documentJob.id).then(setGraph).catch(() => setGraph({ nodes: [], edges: [] }));
+    refreshDocumentData(documentJob.id);
   }, [documentJob?.id, documentJob?.status]);
+
+  useEffect(() => {
+    if (!documentJob || TERMINAL_STATUSES.has(documentJob.status)) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      getDocumentStats(documentJob.id).then(setStats).catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [documentJob?.id, documentJob?.status]);
+
+  async function refreshDocumentData(documentId: number) {
+    const [outline, nextRules, nextGraph, nextStats] = await Promise.all([
+      getOutline(documentId),
+      getRules(documentId).catch(() => []),
+      getRuleGraph(documentId).catch(() => ({ nodes: [], edges: [] })),
+      getDocumentStats(documentId).catch(() => null)
+    ]);
+    setSections(outline);
+    setRules(nextRules);
+    setGraph(nextGraph);
+    if (nextStats) setStats(nextStats);
+  }
+
+  async function handleSaveRuntimeConfig(payload: RuntimeConfigUpdate) {
+    setBusy(true);
+    setError("");
+    try {
+      const saved = await saveRuntimeConfig(payload);
+      setRuntimeConfig(saved);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to save runtime config");
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function handleCreate(payload: { name: string; pdf_url: string; contract_family: ContractFamily }) {
     setBusy(true);
@@ -77,9 +139,11 @@ export function App() {
     try {
       const created = await createDocument(payload);
       setDocumentJob(created);
+      setActiveView("processing");
       setSections([]);
       setRules([]);
       setGraph({ nodes: [], edges: [] });
+      setStats(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to create document");
     } finally {
@@ -93,6 +157,7 @@ export function App() {
     setError("");
     try {
       await extractRules(documentJob.id);
+      setActiveView("processing");
       const [nextDocument, nextRules, nextGraph] = await Promise.all([
         getDocument(documentJob.id),
         getRules(documentJob.id),
@@ -115,8 +180,23 @@ export function App() {
           <p className="eyebrow">NEC Public Works Practice Notes</p>
           <h1>Rule Extraction Portal</h1>
         </div>
-        <StatusBadge status={documentJob?.status ?? "idle"} />
+        <div className="topbar-actions">
+          <StatusBadge status={documentJob?.status ?? "idle"} />
+        </div>
       </header>
+
+      <nav className="view-tabs" aria-label="Portal navigation">
+        {VIEWS.map((view) => (
+          <button
+            className={activeView === view ? "active" : ""}
+            key={view}
+            onClick={() => setActiveView(view)}
+            type="button"
+          >
+            {viewLabel(view)}
+          </button>
+        ))}
+      </nav>
 
       {error ? (
         <div className="alert" role="alert">
@@ -125,20 +205,40 @@ export function App() {
         </div>
       ) : null}
 
-      <section className="workflow-grid">
-        <ImportPanel onCreate={handleCreate} busy={busy} />
-        <ProgressPanel documentJob={documentJob} />
-      </section>
-
-      {documentJob && READY_STATUSES.has(documentJob.status) ? (
-        <section className="workspace-grid">
-          <MarkdownReview documentId={documentJob.id} sections={sections} onSectionsChange={setSections} />
-          <RulesPanel rules={rules} onRulesChange={setRules} />
-          <RuleFlow graph={graph} />
+      {activeView === "import" ? (
+        <section className="portal-page import-page">
+          <RuntimeConfigPanel runtimeConfig={runtimeConfig} onSave={handleSaveRuntimeConfig} busy={busy} />
+          <ImportPanel onCreate={handleCreate} busy={busy} runtimeConfig={runtimeConfig} />
         </section>
       ) : null}
 
-      {documentJob?.status === "markdown_ready" ? (
+      {activeView === "processing" ? (
+        <section className="portal-page">
+          <ProgressPanel documentJob={documentJob} stats={stats} />
+          {documentJob ? <ExportPanel documentId={documentJob.id} kinds={["mineru-request", "mineru-result", "llm-windows"]} /> : null}
+        </section>
+      ) : null}
+
+      {activeView === "review" && documentJob && READY_STATUSES.has(documentJob.status) ? (
+        <section className="portal-page">
+          <MarkdownReview documentId={documentJob.id} sections={sections} onSectionsChange={setSections} />
+          <ExportPanel documentId={documentJob.id} kinds={["markdown"]} />
+        </section>
+      ) : null}
+
+      {activeView === "rules" && documentJob && READY_STATUSES.has(documentJob.status) ? (
+        <section className="portal-page">
+          <RulesPanel documentId={documentJob.id} rules={rules} stats={stats} onRulesChange={setRules} />
+        </section>
+      ) : null}
+
+      {activeView === "map" && documentJob && READY_STATUSES.has(documentJob.status) ? (
+        <section className="portal-page">
+          <RuleMap documentId={documentJob.id} graph={graph} rules={rules} sections={sections} />
+        </section>
+      ) : null}
+
+      {documentJob?.status === "markdown_ready" && activeView !== "import" ? (
         <div className="action-bar">
           <button className="primary-button" onClick={handleExtract} disabled={busy}>
             {busy ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
@@ -152,10 +252,12 @@ export function App() {
 
 function ImportPanel({
   onCreate,
-  busy
+  busy,
+  runtimeConfig
 }: {
   onCreate: (payload: { name: string; pdf_url: string; contract_family: ContractFamily }) => void;
   busy: boolean;
+  runtimeConfig: RuntimeConfig | null;
 }) {
   const [name, setName] = useState("NEC Practice Note Demo");
   const [pdfUrl, setPdfUrl] = useState("");
@@ -200,22 +302,134 @@ function ImportPanel({
           {busy ? <Loader2 className="spin" size={18} /> : <ChevronRight size={18} />}
           Start MinerU
         </button>
+        {!runtimeConfig?.mineru_configured ? <p className="error-text">MinerU token is required before import.</p> : null}
       </form>
     </section>
   );
 }
 
-function ProgressPanel({ documentJob }: { documentJob: DocumentJob | null }) {
-  const steps = ["mineru_queued", "mineru_processing", "markdown_ready", "rules_extracted"];
-  const currentIndex = documentJob ? steps.indexOf(documentJob.status) : -1;
+function RuntimeConfigPanel({
+  runtimeConfig,
+  onSave,
+  busy
+}: {
+  runtimeConfig: RuntimeConfig | null;
+  onSave: (payload: RuntimeConfigUpdate) => void;
+  busy: boolean;
+}) {
+  const [draft, setDraft] = useState<RuntimeConfigUpdate>({});
+
+  useEffect(() => {
+    if (!runtimeConfig) return;
+    setDraft({
+      mineru_api_base: runtimeConfig.mineru_api_base,
+      mineru_model_version: runtimeConfig.mineru_model_version,
+      llm_provider: runtimeConfig.llm_provider,
+      llm_api_base: runtimeConfig.llm_api_base,
+      llm_model: runtimeConfig.llm_model,
+      llm_concurrency: runtimeConfig.llm_concurrency
+    });
+  }, [runtimeConfig]);
+
+  const concurrency = Math.max(1, Math.min(20, Number(draft.llm_concurrency || 8)));
 
   return (
     <section className="panel">
       <div className="panel-title">
+        <Settings size={20} />
+        <h2>Runtime API Config</h2>
+      </div>
+      <div className="config-badges">
+        <span className={runtimeConfig?.mineru_configured ? "configured" : "missing"}>MinerU {runtimeConfig?.mineru_configured ? "configured" : "missing"}</span>
+        <span className={runtimeConfig?.llm_configured ? "configured" : "missing"}>LLM {runtimeConfig?.llm_configured ? "configured" : "missing"}</span>
+      </div>
+      <form
+        className="form-stack config-grid"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave({ ...draft, llm_concurrency: concurrency });
+        }}
+      >
+        <label>
+          MinerU API Token
+          <input
+            type="password"
+            placeholder={runtimeConfig?.mineru_configured ? "Configured - leave blank to keep" : "Paste MinerU token"}
+            onChange={(event) => setDraft({ ...draft, mineru_api_token: event.target.value })}
+          />
+        </label>
+        <label>
+          MinerU Base URL
+          <input value={draft.mineru_api_base || ""} onChange={(event) => setDraft({ ...draft, mineru_api_base: event.target.value })} />
+        </label>
+        <label>
+          MinerU Model Version
+          <input
+            value={draft.mineru_model_version || ""}
+            onChange={(event) => setDraft({ ...draft, mineru_model_version: event.target.value })}
+          />
+        </label>
+        <label>
+          LLM Provider
+          <input value={draft.llm_provider || ""} onChange={(event) => setDraft({ ...draft, llm_provider: event.target.value })} />
+        </label>
+        <label>
+          LLM API Key
+          <input
+            type="password"
+            placeholder={runtimeConfig?.llm_configured ? "Configured - leave blank to keep" : "Paste OpenAI-compatible key"}
+            onChange={(event) => setDraft({ ...draft, llm_api_key: event.target.value })}
+          />
+        </label>
+        <label>
+          LLM Base URL
+          <input value={draft.llm_api_base || ""} onChange={(event) => setDraft({ ...draft, llm_api_base: event.target.value })} />
+        </label>
+        <label>
+          LLM Model
+          <input value={draft.llm_model || ""} onChange={(event) => setDraft({ ...draft, llm_model: event.target.value })} />
+        </label>
+        <label>
+          LLM Concurrency: {concurrency}
+          <input
+            max={runtimeConfig?.max_llm_concurrency || 20}
+            min={1}
+            type="range"
+            value={concurrency}
+            onChange={(event) => setDraft({ ...draft, llm_concurrency: Number(event.target.value) })}
+          />
+        </label>
+        <button className="primary-button" type="submit" disabled={busy}>
+          {busy ? <Loader2 className="spin" size={18} /> : <Save size={18} />}
+          Save API Config
+        </button>
+      </form>
+    </section>
+  );
+}
+
+function ProgressPanel({ documentJob, stats }: { documentJob: DocumentJob | null; stats: DocumentStats | null }) {
+  const steps = [
+    "mineru_queued",
+    "mineru_processing",
+    "markdown_ready",
+    "classifying_sections",
+    "extracting_rules",
+    "rules_extracted"
+  ];
+  const currentIndex = documentJob ? steps.indexOf(documentJob.status) : -1;
+  const progress = currentIndex < 0 ? 0 : Math.round(((currentIndex + 1) / steps.length) * 100);
+
+  return (
+    <section className="panel processing-hud">
+      <div className="panel-title">
         <SearchCheck size={20} />
         <h2>Processing</h2>
       </div>
-      <ol className="timeline">
+      <div className="hud-progress" aria-label="Processing progress">
+        <span style={{ width: `${progress}%` }} />
+      </div>
+      <ol className="timeline horizontal">
         {steps.map((step, index) => (
           <li key={step} className={index <= currentIndex ? "done" : ""}>
             {index <= currentIndex ? <CheckCircle2 size={18} /> : <span className="step-dot" />}
@@ -233,6 +447,7 @@ function ProgressPanel({ documentJob }: { documentJob: DocumentJob | null }) {
         <p className="muted">No document job yet.</p>
       )}
       {documentJob?.error_message ? <p className="error-text">{documentJob.error_message}</p> : null}
+      <StatsGrid stats={stats} />
     </section>
   );
 }
@@ -390,16 +605,44 @@ function EditableParagraph({
   );
 }
 
-function RulesPanel({ rules, onRulesChange }: { rules: Rule[]; onRulesChange: (rules: Rule[]) => void }) {
+function RulesPanel({
+  documentId,
+  rules,
+  stats,
+  onRulesChange
+}: {
+  documentId: number;
+  rules: Rule[];
+  stats: DocumentStats | null;
+  onRulesChange: (rules: Rule[]) => void;
+}) {
+  const [filter, setFilter] = useState("all");
+  const filteredRules = rules.filter((rule) => {
+    if (filter === "all") return true;
+    if (filter === "low") return rule.confidence < 0.65;
+    if (filter === "reviewed") return rule.review_status === "reviewed";
+    if (filter === "reference") return rule.dependencies.some((dependency) => dependency.type === "references");
+    return rule.type === filter;
+  });
+
   return (
     <section className="panel tall-panel">
       <div className="panel-title">
         <CheckCircle2 size={20} />
         <h2>Rule Cards</h2>
       </div>
+      <StatsGrid stats={stats} />
+      <div className="filter-row">
+        {["all", "obligation", "option", "reference", "low", "reviewed"].map((item) => (
+          <button className={filter === item ? "active" : ""} key={item} onClick={() => setFilter(item)} type="button">
+            {item}
+          </button>
+        ))}
+      </div>
+      <ExportPanel documentId={documentId} kinds={["rules-json", "rules-csv", "llm-windows"]} />
       <div className="rule-list">
         {rules.length === 0 ? <p className="muted">Extracted rules will appear here.</p> : null}
-        {rules.map((rule) => (
+        {filteredRules.map((rule) => (
           <RuleCard key={rule.id} rule={rule} onSaved={(next) => onRulesChange(rules.map((r) => (r.id === next.id ? next : r)))} />
         ))}
       </div>
@@ -471,25 +714,50 @@ function RuleCard({ rule, onSaved }: { rule: Rule; onSaved: (rule: Rule) => void
   );
 }
 
-function RuleFlow({ graph }: { graph: RuleGraph }) {
+function RuleMap({
+  documentId,
+  graph,
+  rules,
+  sections
+}: {
+  documentId: number;
+  graph: RuleGraph;
+  rules: Rule[];
+  sections: Section[];
+}) {
   const nodeById = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph.nodes]);
+  const sectionTitleById = useMemo(() => flattenSections(sections).reduce((map, section) => map.set(section.id, section.title), new Map<string, string>()), [sections]);
 
   return (
     <section className="panel tall-panel">
       <div className="panel-title">
         <GitBranch size={20} />
-        <h2>Rule Flow</h2>
+        <h2>Rule Map</h2>
       </div>
+      <ExportPanel documentId={documentId} kinds={["rule-graph"]} />
       {graph.nodes.length === 0 ? <p className="muted">Dependencies and option paths will appear here.</p> : null}
-      <div className="flow-list">
-        {graph.nodes.map((node) => (
-          <div className="flow-node" key={node.id}>
+      <div className="relationship-map">
+        {rules.map((rule) => (
+          <div className="flow-node" key={rule.id}>
             <div>
-              <strong>{node.label}</strong>
-              <span>{node.type}</span>
+              <strong>{rule.subject || rule.action || rule.id}</strong>
+              <span>{rule.type}</span>
             </div>
+            <p>
+              Section <ChevronRight size={14} /> {sectionTitleById.get(rule.section_id || "") || rule.section_id || "unknown"}
+            </p>
+            {rule.options.map((option) => (
+              <p key={`${rule.id}-${option.label}`}>
+                option {option.label || "path"} <ChevronRight size={14} /> {option.action || option.condition || "related path"}
+              </p>
+            ))}
+            {rule.dependencies.map((dependency) => (
+              <p key={`${rule.id}-${dependency.type}-${dependency.rule_id}-${dependency.reason}`}>
+                {dependency.type} <ChevronRight size={14} /> {dependency.rule_id ? nodeById.get(dependency.rule_id)?.label ?? dependency.rule_id : dependency.reason}
+              </p>
+            ))}
             {graph.edges
-              .filter((edge) => edge.source === node.id)
+              .filter((edge) => edge.source === rule.id)
               .map((edge) => (
                 <p key={`${edge.source}-${edge.target}-${edge.label}`}>
                   {edge.label} <ChevronRight size={14} /> {nodeById.get(edge.target)?.label ?? edge.target}
@@ -506,8 +774,66 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={`status-badge status-${status}`}>{labelStatus(status)}</span>;
 }
 
+function StatsGrid({ stats }: { stats: DocumentStats | null }) {
+  const items = [
+    ["Sections", stats?.total_sections ?? 0],
+    ["Classified", stats?.classified_sections ?? 0],
+    ["Candidates", stats?.candidate_sections ?? 0],
+    ["Windows", `${stats?.llm_windows_completed ?? 0}/${stats?.llm_windows_total ?? 0}`],
+    ["Rules", stats?.rules_extracted ?? 0],
+    ["Options", stats?.option_rules ?? 0],
+    ["Links", stats?.dependency_links ?? 0],
+    ["Low confidence", stats?.low_confidence_rules ?? 0],
+    ["Reviewed", stats?.reviewed_rules ?? 0],
+    ["Draft", stats?.draft_rules ?? 0],
+    ["Rejected", stats?.rejected_rules ?? 0],
+    ["Failures", stats?.partial_failures ?? 0]
+  ];
+  return (
+    <div className="stats-grid">
+      {items.map(([label, value]) => (
+        <div className="stat-card" key={label}>
+          <span>{label}</span>
+          <strong>{value}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ExportPanel({ documentId, kinds }: { documentId: number; kinds: string[] }) {
+  return (
+    <div className="export-row">
+      {kinds.map((kind) => (
+        <a className="export-button" href={exportUrl(documentId, kind)} key={kind}>
+          <Download size={15} />
+          {exportLabel(kind)}
+        </a>
+      ))}
+    </div>
+  );
+}
+
 function labelStatus(status: string) {
   return status.replaceAll("_", " ");
+}
+
+function viewLabel(view: View) {
+  const labels: Record<View, string> = {
+    import: "Import PDF",
+    processing: "Processing",
+    review: "Document Review",
+    rules: "Rules",
+    map: "Rule Map"
+  };
+  return labels[view];
+}
+
+function exportLabel(kind: string) {
+  return kind
+    .split("-")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function isClauseParagraph(section: Section) {
@@ -657,6 +983,10 @@ function sanitizeTableHtml(html: string) {
     .replace(/<script[\s\S]*?<\/script>/gi, "")
     .replace(/\s+on[a-z]+\s*=\s*"[^"]*"/gi, "")
     .replace(/\s+on[a-z]+\s*=\s*'[^']*'/gi, "");
+}
+
+function flattenSections(sections: Section[]): Section[] {
+  return sections.flatMap((section) => [section, ...flattenSections(section.children)]);
 }
 
 function replaceSection(sections: Section[], next: Section): Section[] {

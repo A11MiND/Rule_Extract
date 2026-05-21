@@ -13,6 +13,45 @@ export interface DocumentJob {
   artifact_manifest: Record<string, unknown>;
 }
 
+export interface RuntimeConfig {
+  mineru_api_base: string;
+  mineru_model_version: string;
+  mineru_configured: boolean;
+  llm_provider: string;
+  llm_api_base: string;
+  llm_model: string;
+  llm_configured: boolean;
+  llm_concurrency: number;
+  max_llm_concurrency: number;
+}
+
+export interface RuntimeConfigUpdate {
+  mineru_api_base?: string;
+  mineru_api_token?: string;
+  mineru_model_version?: string;
+  llm_provider?: string;
+  llm_api_base?: string;
+  llm_api_key?: string;
+  llm_model?: string;
+  llm_concurrency?: number;
+}
+
+export interface DocumentStats {
+  total_sections: number;
+  classified_sections: number;
+  candidate_sections: number;
+  llm_windows_completed: number;
+  llm_windows_total: number;
+  rules_extracted: number;
+  option_rules: number;
+  dependency_links: number;
+  low_confidence_rules: number;
+  reviewed_rules: number;
+  draft_rules: number;
+  rejected_rules: number;
+  partial_failures: number;
+}
+
 export interface Section {
   id: string;
   document_id: number;

@@ -27,9 +27,15 @@ class MinerUError(RuntimeError):
 
 
 class MinerUClient:
-    def __init__(self, api_base: str | None = None, token: str | None = None) -> None:
+    def __init__(
+        self,
+        api_base: str | None = None,
+        token: str | None = None,
+        model_version: str | None = None,
+    ) -> None:
         self.api_base = (api_base or settings.mineru_api_base).rstrip("/")
         self.token = token if token is not None else settings.mineru_api_token
+        self.model_version = model_version or settings.mineru_model_version
 
     def _headers(self) -> dict[str, str]:
         if not self.token:
@@ -37,7 +43,7 @@ class MinerUClient:
         return {"Content-Type": "application/json", "Authorization": f"Bearer {self.token}"}
 
     def submit_task(self, pdf_url: str) -> str:
-        payload = {"url": pdf_url, "model_version": settings.mineru_model_version}
+        payload = self.build_submit_payload(pdf_url)
         response = requests.post(
             f"{self.api_base}/extract/task", headers=self._headers(), json=payload, timeout=30
         )
@@ -50,6 +56,9 @@ class MinerUClient:
         if not task_id:
             raise MinerUError(f"MinerU response did not include a task id: {data}")
         return str(task_id)
+
+    def build_submit_payload(self, pdf_url: str) -> dict[str, str]:
+        return {"url": pdf_url, "model_version": self.model_version}
 
     def poll_until_done(self, task_id: str) -> MinerUTaskResult:
         latest: dict = {}

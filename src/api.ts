@@ -1,4 +1,13 @@
-import type { ContractFamily, DocumentJob, Rule, RuleGraph, Section } from "./types";
+import type {
+  ContractFamily,
+  DocumentJob,
+  DocumentStats,
+  Rule,
+  RuleGraph,
+  RuntimeConfig,
+  RuntimeConfigUpdate,
+  Section
+} from "./types";
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
@@ -18,6 +27,17 @@ export function createDocument(payload: {
   contract_family: ContractFamily;
 }) {
   return request<DocumentJob>("/api/documents", {
+    method: "POST",
+    body: JSON.stringify(payload)
+  });
+}
+
+export function getRuntimeConfig() {
+  return request<RuntimeConfig>("/api/runtime-config");
+}
+
+export function saveRuntimeConfig(payload: RuntimeConfigUpdate) {
+  return request<RuntimeConfig>("/api/runtime-config", {
     method: "POST",
     body: JSON.stringify(payload)
   });
@@ -62,4 +82,12 @@ export function saveRule(rule: Rule) {
 
 export function getRuleGraph(documentId: number) {
   return request<RuleGraph>(`/api/documents/${documentId}/rule-graph`);
+}
+
+export function getDocumentStats(documentId: number) {
+  return request<DocumentStats>(`/api/documents/${documentId}/stats`);
+}
+
+export function exportUrl(documentId: number, kind: string) {
+  return `/api/documents/${documentId}/exports/${kind}`;
 }
