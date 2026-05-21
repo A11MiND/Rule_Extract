@@ -93,7 +93,15 @@ def parse_mineru_content_sections(content_list_path: Path) -> list[ParsedSection
 
     for item in data:
         item_type = item.get("type")
-        if item_type not in {"text", "list", "table"}:
+        if item_type not in {"text", "list", "table", "image", "chart"}:
+            continue
+
+        if item_type in {"table", "image", "chart"}:
+            if not started_body or not sections:
+                continue
+            block = normalize_mineru_media(item)
+            if block:
+                sections[-1].content = append_content(sections[-1].content, block)
             continue
 
         text = normalize_mineru_text(item)
@@ -131,11 +139,29 @@ def parse_mineru_content_sections(content_list_path: Path) -> list[ParsedSection
     return sections
 
 
+def normalize_mineru_media(item: dict) -> str:
+    item_type = str(item.get("type") or "")
+    parts: list[str] = []
+    image_path = str(item.get("img_path") or "").strip()
+    subtype = str(item.get("sub_type") or "").strip() or item_type
+
+    if image_path:
+        parts.append(f"[[MINERU_MEDIA|{item_type}|{subtype}|{image_path}]]")
+
+    if item_type == "table":
+        table_body = str(item.get("table_body") or "").strip()
+        if table_body:
+            parts.append(f"[[MINERU_TABLE_HTML]]\n{table_body}\n[[/MINERU_TABLE_HTML]]")
+    elif item_type == "chart":
+        content = str(item.get("content") or "").strip()
+        if content:
+            parts.append(f"[[MINERU_TABLE_MD|{subtype}]]\n{content}\n[[/MINERU_TABLE_MD]]")
+
+    return "\n\n".join(parts)
+
+
 def normalize_mineru_text(item: dict) -> str:
-    if item.get("type") == "table":
-        text = item.get("table_body") or item.get("text") or ""
-    else:
-        text = item.get("text") or ""
+    text = item.get("text") or ""
     text = re.sub(r"\s+", " ", str(text)).strip()
     return text
 

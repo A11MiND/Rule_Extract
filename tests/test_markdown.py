@@ -78,3 +78,30 @@ def test_parse_mineru_content_sections_infers_numbered_hierarchy(tmp_path):
     ]
     assert tree[0].children[0].children[0].title.startswith("1.1.1")
     assert sections[-1].content == "Considerations are included in Section A4.2."
+
+
+def test_parse_mineru_content_sections_preserves_media_and_tables(tmp_path):
+    content_list = [
+        {"type": "text", "text": "1 EXECUTIVE SUMMARY ", "text_level": 1},
+        {"type": "text", "text": "1.1 PURPOSE ", "text_level": 1},
+        {"type": "text", "text": "The matrix is shown below."},
+        {
+            "type": "chart",
+            "img_path": "images/scatter.jpg",
+            "sub_type": "scatter",
+            "content": "| Point | Risk |\n|---|---|\n| A | Low |",
+        },
+        {
+            "type": "table",
+            "table_body": "<table><tr><td>Description</td><td>Value</td></tr></table>",
+        },
+    ]
+    path = tmp_path / "sample_content_list.json"
+    path.write_text(json.dumps(content_list), encoding="utf-8")
+
+    sections = parse_mineru_content_sections(path)
+
+    assert "[[MINERU_MEDIA|chart|scatter|images/scatter.jpg]]" in sections[-1].content
+    assert "[[MINERU_TABLE_MD|scatter]]" in sections[-1].content
+    assert "[[MINERU_TABLE_HTML]]" in sections[-1].content
+    assert "<table><tr><td>Description</td><td>Value</td></tr></table>" in sections[-1].content

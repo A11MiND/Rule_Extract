@@ -297,6 +297,7 @@ function SectionPreview({
     return (
       <div className={`doc-block doc-depth-${Math.min(section.level, 6)}`} data-section-id={section.id}>
         <EditableParagraph
+          documentId={documentId}
           value={draft}
           saving={saving}
           onChange={setDraft}
@@ -319,6 +320,7 @@ function SectionPreview({
       </HeadingTag>
       {section.content.trim() ? (
         <EditableParagraph
+          documentId={documentId}
           value={draft}
           saving={saving}
           onChange={setDraft}
@@ -334,12 +336,14 @@ function SectionPreview({
 }
 
 function EditableParagraph({
+  documentId,
   value,
   saving,
   onChange,
   onSave,
   className
 }: {
+  documentId: number;
   value: string;
   saving: boolean;
   onChange: (value: string) => void;
@@ -347,6 +351,19 @@ function EditableParagraph({
   className: string;
 }) {
   const [editing, setEditing] = useState(false);
+  const blocks = useMemo(() => parseRichBlocks(value), [value]);
+  const hasRichBlocks = blocks.some((block) => block.type !== "text");
+
+  if (hasRichBlocks) {
+    return (
+      <div className="editable-block">
+        <div className={`${className} rich-content`}>{renderRichBlocks(blocks, documentId)}</div>
+        <span className="edit-state" aria-label={saving ? "Saving" : "Rendered"}>
+          {saving ? <Loader2 className="spin" size={14} /> : <Check size={14} />}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className="editable-block">
@@ -512,6 +529,134 @@ function renderInlineReferences(value: string) {
     }
     return part;
   });
+}
+
+type RichBlock =
+  | { type: "text"; value: string }
+  | { type: "media"; mediaType: string; subtype: string; path: string }
+  | { type: "htmlTable"; html: string }
+  | { type: "markdownTable"; subtype: string; markdown: string };
+
+const RICH_TOKEN_RE =
+  /\[\[MINERU_MEDIA\|([^|\]]*)\|([^|\]]*)\|([^\]]+)\]\]|\[\[MINERU_TABLE_HTML\]\]([\s\S]*?)\[\[\/MINERU_TABLE_HTML\]\]|\[\[MINERU_TABLE_MD\|?([^\]]*)\]\]([\s\S]*?)\[\[\/MINERU_TABLE_MD\]\]/g;
+
+function parseRichBlocks(value: string): RichBlock[] {
+  const blocks: RichBlock[] = [];
+  let cursor = 0;
+
+  for (const match of value.matchAll(RICH_TOKEN_RE)) {
+    const index = match.index ?? 0;
+    if (index > cursor) {
+      blocks.push({ type: "text", value: value.slice(cursor, index) });
+    }
+    if (match[1] !== undefined) {
+      blocks.push({
+        type: "media",
+        mediaType: match[1],
+        subtype: match[2],
+        path: match[3]
+      });
+    } else if (match[4] !== undefined) {
+      blocks.push({ type: "htmlTable", html: match[4].trim() });
+    } else {
+      blocks.push({ type: "markdownTable", subtype: match[5] || "data", markdown: (match[6] || "").trim() });
+    }
+    cursor = index + match[0].length;
+  }
+
+  if (cursor < value.length) {
+    blocks.push({ type: "text", value: value.slice(cursor) });
+  }
+  return blocks.length ? blocks : [{ type: "text", value }];
+}
+
+function renderRichBlocks(blocks: RichBlock[], documentId: number) {
+  return blocks.map((block, index) => {
+    if (block.type === "media") {
+      const src = `/storage/documents/${documentId}/mineru/${block.path}`;
+      const label = block.subtype || block.mediaType;
+      return <img className="doc-media" src={src} alt={label} key={`${block.path}-${index}`} loading="lazy" />;
+    }
+    if (block.type === "htmlTable") {
+      return (
+        <div
+          className="doc-table-wrap"
+          dangerouslySetInnerHTML={{ __html: sanitizeTableHtml(block.html) }}
+          key={`html-table-${index}`}
+        />
+      );
+    }
+    if (block.type === "markdownTable") {
+      return (
+        <details className="doc-details" key={`md-table-${index}`}>
+          <summary>{block.subtype || "table"}</summary>
+          {renderMarkdownTable(block.markdown)}
+        </details>
+      );
+    }
+    return renderTextParagraphs(block.value, index);
+  });
+}
+
+function renderTextParagraphs(value: string, keyPrefix: number) {
+  return value
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part, index) => (
+      <p className="rich-paragraph" key={`text-${keyPrefix}-${index}`}>
+        {renderInlineReferences(part)}
+      </p>
+    ));
+}
+
+function renderMarkdownTable(markdown: string) {
+  const rows = markdown
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.includes("|"))
+    .map((line) =>
+      line
+        .replace(/^\|/, "")
+        .replace(/\|$/, "")
+        .split("|")
+        .map((cell) => cell.trim())
+    );
+  if (!rows.length) return <pre className="doc-code">{markdown}</pre>;
+
+  const [header, maybeSeparator, ...rest] = rows;
+  const hasSeparator = maybeSeparator?.every((cell) => /^:?-{3,}:?$/.test(cell));
+  const bodyRows = hasSeparator ? rest : rows.slice(1);
+
+  return (
+    <div className="doc-table-wrap">
+      <table>
+        <thead>
+          <tr>
+            {header.map((cell, index) => (
+              <th key={`${cell}-${index}`}>{cell}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {bodyRows.map((row, rowIndex) => (
+            <tr key={`row-${rowIndex}`}>
+              {row.map((cell, cellIndex) => (
+                <td key={`${rowIndex}-${cellIndex}`}>{cell}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function sanitizeTableHtml(html: string) {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/\s+on[a-z]+\s*=\s*"[^"]*"/gi, "")
+    .replace(/\s+on[a-z]+\s*=\s*'[^']*'/gi, "");
 }
 
 function replaceSection(sections: Section[], next: Section): Section[] {

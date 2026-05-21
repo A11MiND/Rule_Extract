@@ -4,9 +4,11 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from . import models, schemas
+from .config import settings
 from .database import SessionLocal, get_db, init_db
 from .services.artifacts import extract_zip, write_zip
 from .services.extraction import classify_sections, extract_rules
@@ -16,6 +18,7 @@ from .services.mineru import MinerUClient, MinerUError
 
 
 app = FastAPI(title="NEC Rule Extraction Demo")
+app.mount("/storage", StaticFiles(directory=settings.storage_root), name="storage")
 
 app.add_middleware(
     CORSMiddleware,

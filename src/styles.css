@@ -349,6 +349,76 @@ label {
   padding-left: 96px;
 }
 
+.rich-content.doc-clause {
+  padding-left: 0;
+  text-indent: 0;
+}
+
+.rich-paragraph {
+  margin: 0 0 12px;
+}
+
+.doc-media {
+  border: 1px solid #d8ded9;
+  display: block;
+  height: auto;
+  margin: 18px auto;
+  max-width: min(100%, 760px);
+}
+
+.doc-details {
+  margin: 8px 0 16px;
+}
+
+.doc-details summary {
+  color: #2d3936;
+  cursor: pointer;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 16px;
+  font-weight: 800;
+  margin-bottom: 8px;
+}
+
+.doc-table-wrap {
+  margin: 14px 0 18px;
+  overflow-x: auto;
+}
+
+.doc-table-wrap table {
+  border-collapse: collapse;
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+  min-width: 520px;
+  width: 100%;
+}
+
+.doc-table-wrap th,
+.doc-table-wrap td {
+  border: 1px solid #cfd7d2;
+  padding: 8px 10px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.doc-table-wrap th {
+  background: #eef2ef;
+  color: #18201f;
+  font-weight: 800;
+}
+
+.doc-code {
+  background: #f2f4f1;
+  border: 1px solid #d8ded9;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, "SFMono-Regular", Menlo, Consolas, monospace;
+  font-size: 13px;
+  overflow-x: auto;
+  padding: 10px;
+}
+
 .doc-body:focus,
 .doc-clause:focus {
   background: #fff9e8;
