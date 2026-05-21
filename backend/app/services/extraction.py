@@ -159,7 +159,21 @@ def extract_rules(
                     source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
                     section_id = source.get("section_id") or raw.get("section_id")
                     section = section_by_id.get(section_id) or batch[0]
-                    saved += save_rule_if_new(db, document, normalize_rule(raw, document.id, section))
+                    try:
+                        saved += save_rule_if_new(db, document, normalize_rule(raw, document.id, section))
+                    except Exception as exc:
+                        append_llm_window_log(
+                            document.id,
+                            {
+                                "kind": "rule_validation",
+                                "batch_index": index,
+                                "section_ids": [section.id for section in batch],
+                                "status": "failed",
+                                "error": str(exc),
+                                "raw_rule": raw,
+                            },
+                        )
+                        update_window_progress(db, document, failure_delta=1)
 
     document.status = "rules_extracted"
     db.commit()
@@ -292,13 +306,16 @@ def normalize_rule(raw: dict[str, Any], document_id: int, section: models.Sectio
     raw["type"] = normalize_rule_type(raw.get("type"))
     raw["review_status"] = normalize_review_status(raw.get("review_status"))
     raw["confidence"] = coerce_confidence(raw.get("confidence"))
+    raw["subject"] = normalize_text(raw.get("subject"), fallback=section.title)
+    raw["condition"] = normalize_text(raw.get("condition"))
+    raw["action"] = normalize_text(raw.get("action"), fallback=section.content or section.title)
     raw["actor"] = normalize_optional_text(raw.get("actor"))
     raw["target"] = normalize_optional_text(raw.get("target"))
     raw["deadline"] = normalize_optional_text(raw.get("deadline"))
-    raw["notes"] = str(raw.get("notes") or "")
+    raw["notes"] = normalize_text(raw.get("notes"))
     raw["options"] = normalize_options(raw.get("options"))
     raw["dependencies"] = normalize_dependencies(raw.get("dependencies"))
-    raw["next_rule_ids"] = raw.get("next_rule_ids") if isinstance(raw.get("next_rule_ids"), list) else []
+    raw["next_rule_ids"] = normalize_string_list(raw.get("next_rule_ids"))
     return raw
 
 
@@ -313,9 +330,9 @@ def normalize_source(source: dict[str, Any], raw: dict[str, Any], section: model
     if evidence_text is None:
         evidence_text = raw.get("evidence_text") or ""
     return {
-        "heading_path": heading_path,
+        "heading_path": [str(item) for item in heading_path],
         "section_id": source.get("section_id") or section.id,
-        "page_range": source.get("page_range"),
+        "page_range": normalize_optional_text(source.get("page_range")),
         "evidence_text": str(evidence_text),
         "coordinates": coordinates,
     }
@@ -330,12 +347,10 @@ def normalize_options(value: Any) -> list[dict[str, Any]]:
             options.append(
                 {
                     "label": str(item.get("label") or item.get("name") or ""),
-                    "condition": str(item.get("condition") or ""),
-                    "action": str(item.get("action") or item.get("description") or ""),
-                    "next_rule_ids": item.get("next_rule_ids") if isinstance(item.get("next_rule_ids"), list) else [],
-                    "referenced_sections": item.get("referenced_sections")
-                    if isinstance(item.get("referenced_sections"), list)
-                    else [],
+                    "condition": normalize_text(item.get("condition")),
+                    "action": normalize_text(item.get("action") or item.get("description")),
+                    "next_rule_ids": normalize_string_list(item.get("next_rule_ids")),
+                    "referenced_sections": normalize_string_list(item.get("referenced_sections")),
                 }
             )
         elif item:
@@ -360,8 +375,8 @@ def normalize_dependencies(value: Any) -> list[dict[str, Any]]:
             dependencies.append(
                 {
                     "type": item.get("type") if item.get("type") in {"requires", "leads_to", "alternative_to", "references"} else "references",
-                    "rule_id": str(item.get("rule_id") or ""),
-                    "reason": str(item.get("reason") or ""),
+                    "rule_id": normalize_text(item.get("rule_id")),
+                    "reason": normalize_text(item.get("reason")),
                 }
             )
         elif item:
@@ -389,11 +404,24 @@ def normalize_review_status(value: Any) -> str:
 def normalize_optional_text(value: Any) -> str | None:
     if value is None:
         return None
+    text = normalize_text(value)
+    return text or None
+
+
+def normalize_text(value: Any, fallback: str = "") -> str:
+    if value is None:
+        return fallback
     if isinstance(value, list):
-        return ", ".join(str(item) for item in value if item is not None)
+        return "; ".join(normalize_text(item) for item in value if item is not None)
     if isinstance(value, dict):
-        return ", ".join(f"{key}: {item}" for key, item in value.items())
+        return "; ".join(f"{key}: {normalize_text(item)}" for key, item in value.items())
     return str(value)
+
+
+def normalize_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [normalize_text(item) for item in value if normalize_text(item)]
 
 
 def save_rule_if_new(db: Session, document: models.Document, raw: dict[str, Any]) -> int:

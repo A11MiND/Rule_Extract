@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from . import models, schemas
 from .config import settings
 from .database import SessionLocal, get_db, init_db
-from .services.artifacts import extract_zip, write_zip
+from .services.artifacts import download_source_pdf, extract_zip, write_zip
 from .services.extraction import classify_sections, extract_rules
 from .services.llm import LLMClient, LLMError
 from .services.markdown import build_section_tree, parse_markdown_sections, parse_mineru_content_sections
@@ -107,6 +107,28 @@ def get_outline(document_id: int, db: Session = Depends(get_db)) -> list[schemas
         for section in sections
     ]
     return build_schema_tree(parsed)
+
+
+@app.get("/api/documents/{document_id}/source-pdf")
+def get_source_pdf(document_id: int, db: Session = Depends(get_db)) -> FileResponse:
+    document = require_document(db, document_id)
+    manifest = dict(document.artifact_manifest or {})
+    candidates = []
+    if manifest.get("source_pdf_path"):
+        candidates.append(Path(str(manifest["source_pdf_path"])))
+    candidates.extend(Path(path) for path in manifest.get("files", []) if str(path).lower().endswith(".pdf"))
+    for path in candidates:
+        if path.exists():
+            return FileResponse(path, media_type="application/pdf", filename=f"document-{document_id}.pdf")
+
+    try:
+        path = download_source_pdf(document.id, document.pdf_url)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Unable to load source PDF: {exc}") from exc
+
+    document.artifact_manifest = {**manifest, "source_pdf_path": str(path)}
+    db.commit()
+    return FileResponse(path, media_type="application/pdf", filename=f"document-{document_id}.pdf")
 
 
 @app.put("/api/documents/{document_id}/sections/{section_id}", response_model=schemas.SectionRead)

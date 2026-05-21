@@ -1,6 +1,6 @@
 import zipfile
 
-from backend.app.services.artifacts import extract_zip
+from backend.app.services.artifacts import extract_zip, pick_source_pdf
 
 
 def test_extract_zip_picks_full_markdown(tmp_path):
@@ -16,3 +16,12 @@ def test_extract_zip_picks_full_markdown(tmp_path):
     assert manifest["markdown_path"].endswith("full.md")
     assert len(manifest["json_paths"]) == 1
     assert any(path.endswith("middle.json") for path in manifest["files"])
+
+
+def test_pick_source_pdf_prefers_origin_pdf(tmp_path):
+    other = tmp_path / "source.pdf"
+    origin = tmp_path / "abc_origin.pdf"
+    other.write_bytes(b"%PDF other")
+    origin.write_bytes(b"%PDF origin")
+
+    assert pick_source_pdf(tmp_path) == origin

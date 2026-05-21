@@ -327,17 +327,23 @@ export function App() {
         <section className="portal-page">
           <MarkdownReview
             documentId={documentJob.id}
-            pdfUrl={documentJob.pdf_url}
+            pdfUrl={`/api/documents/${documentJob.id}/source-pdf`}
             sections={sections}
             onSectionsChange={setSections}
           />
-          <ExportPanel documentId={documentJob.id} kinds={["markdown"]} />
+          <ExportPanel documentId={documentJob.id} kinds={["source-pdf", "markdown"]} />
         </section>
       ) : null}
 
       {activeView === "rules" && documentJob && READY_STATUSES.has(documentJob.status) ? (
         <section className="portal-page">
-          <RulesPanel documentId={documentJob.id} rules={rules} stats={stats} onRulesChange={setRules} />
+          <RulesPanel
+            documentId={documentJob.id}
+            errorMessage={documentJob.error_message}
+            rules={rules}
+            stats={stats}
+            onRulesChange={setRules}
+          />
         </section>
       ) : null}
 
@@ -347,11 +353,11 @@ export function App() {
         </section>
       ) : null}
 
-      {documentJob?.status === "markdown_ready" && activeView !== "import" ? (
+      {documentJob && ["markdown_ready", "rule_extraction_failed"].includes(documentJob.status) && activeView !== "import" ? (
         <div className="action-bar">
           <button className="primary-button" onClick={handleExtract} disabled={busy}>
             {busy ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
-            Extract Rules
+            {documentJob.status === "rule_extraction_failed" ? "Retry Extract Rules" : "Extract Rules"}
           </button>
         </div>
       ) : null}
@@ -746,11 +752,13 @@ function EditableParagraph({
 
 function RulesPanel({
   documentId,
+  errorMessage,
   rules,
   stats,
   onRulesChange
 }: {
   documentId: number;
+  errorMessage?: string | null;
   rules: Rule[];
   stats: DocumentStats | null;
   onRulesChange: (rules: Rule[]) => void;
@@ -770,6 +778,7 @@ function RulesPanel({
         <CheckCircle2 size={20} />
         <h2>Rule Cards</h2>
       </div>
+      {errorMessage ? <p className="error-text">Partial extraction failed: {errorMessage}</p> : null}
       <StatsGrid stats={stats} />
       <div className="filter-row">
         {["all", "obligation", "option", "reference", "low", "reviewed"].map((item) => (
@@ -976,6 +985,7 @@ function viewLabel(view: View) {
 }
 
 function exportLabel(kind: string) {
+  if (kind === "source-pdf") return "Source PDF";
   return kind
     .split("-")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
