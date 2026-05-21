@@ -3,6 +3,8 @@ import {
   AlertCircle,
   CheckCircle2,
   ChevronRight,
+  Check,
+  Edit3,
   FileText,
   GitBranch,
   Loader2,
@@ -245,14 +247,14 @@ function MarkdownReview({
   onSectionsChange: (sections: Section[]) => void;
 }) {
   return (
-    <section className="panel tall-panel">
+    <section className="panel tall-panel document-panel">
       <div className="panel-title">
         <FileText size={20} />
-        <h2>Markdown Review</h2>
+        <h2>Document Preview</h2>
       </div>
-      <div className="section-list">
+      <div className="document-preview" aria-label="Patched MinerU Markdown preview">
         {sections.map((section) => (
-          <SectionEditor
+          <SectionPreview
             key={section.id}
             documentId={documentId}
             section={section}
@@ -264,7 +266,7 @@ function MarkdownReview({
   );
 }
 
-function SectionEditor({
+function SectionPreview({
   documentId,
   section,
   onSaved
@@ -273,38 +275,101 @@ function SectionEditor({
   section: Section;
   onSaved: (section: Section) => void;
 }) {
-  const [content, setContent] = useState(section.content);
+  const [draft, setDraft] = useState(section.content || section.title);
   const [saving, setSaving] = useState(false);
+  const paragraphLike = isClauseParagraph(section);
 
-  useEffect(() => setContent(section.content), [section.content]);
+  useEffect(() => setDraft(section.content || section.title), [section.content, section.title]);
 
-  async function handleSave() {
+  async function handleSave(nextContent: string) {
+    const normalized = nextContent.trim();
+    if (normalized === section.content.trim()) return;
     setSaving(true);
     try {
-      const saved = await saveSection(documentId, section.id, content);
+      const saved = await saveSection(documentId, section.id, normalized);
       onSaved(saved);
     } finally {
       setSaving(false);
     }
   }
 
-  return (
-    <details className="section-editor" open={section.level <= 2}>
-      <summary>
-        <span className="heading-level">H{section.level}</span>
-        <span>{section.heading_path.join(" / ")}</span>
-      </summary>
-      <textarea value={content} onChange={(event) => setContent(event.target.value)} rows={8} />
-      <div className="row-actions">
-        <button onClick={handleSave} disabled={saving}>
-          {saving ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
-          Save section
-        </button>
+  if (paragraphLike) {
+    return (
+      <div className={`doc-block doc-depth-${Math.min(section.level, 6)}`} data-section-id={section.id}>
+        <EditableParagraph
+          value={draft}
+          saving={saving}
+          onChange={setDraft}
+          onSave={handleSave}
+          className="doc-clause"
+        />
+        {section.children.map((child) => (
+          <SectionPreview key={child.id} documentId={documentId} section={child} onSaved={onSaved} />
+        ))}
       </div>
+    );
+  }
+
+  const HeadingTag = `h${Math.min(section.level, 4)}` as keyof JSX.IntrinsicElements;
+
+  return (
+    <section className={`doc-block doc-depth-${Math.min(section.level, 6)}`} data-section-id={section.id}>
+      <HeadingTag className={`doc-heading doc-heading-${Math.min(section.level, 4)}`}>
+        {section.title}
+      </HeadingTag>
+      {section.content.trim() ? (
+        <EditableParagraph
+          value={draft}
+          saving={saving}
+          onChange={setDraft}
+          onSave={handleSave}
+          className="doc-body"
+        />
+      ) : null}
       {section.children.map((child) => (
-        <SectionEditor key={child.id} documentId={documentId} section={child} onSaved={onSaved} />
+        <SectionPreview key={child.id} documentId={documentId} section={child} onSaved={onSaved} />
       ))}
-    </details>
+    </section>
+  );
+}
+
+function EditableParagraph({
+  value,
+  saving,
+  onChange,
+  onSave,
+  className
+}: {
+  value: string;
+  saving: boolean;
+  onChange: (value: string) => void;
+  onSave: (value: string) => void;
+  className: string;
+}) {
+  const [editing, setEditing] = useState(false);
+
+  return (
+    <div className="editable-block">
+      <div
+        className={className}
+        contentEditable
+        suppressContentEditableWarning
+        role="textbox"
+        spellCheck={false}
+        onFocus={() => setEditing(true)}
+        onBlur={(event) => {
+          setEditing(false);
+          const next = event.currentTarget.innerText;
+          onChange(next);
+          void onSave(next);
+        }}
+      >
+        {renderInlineReferences(value)}
+      </div>
+      <span className="edit-state" aria-label={saving ? "Saving" : editing ? "Editing" : "Editable"}>
+        {saving ? <Loader2 className="spin" size={14} /> : editing ? <Edit3 size={14} /> : <Check size={14} />}
+      </span>
+    </div>
   );
 }
 
@@ -426,6 +491,27 @@ function StatusBadge({ status }: { status: string }) {
 
 function labelStatus(status: string) {
   return status.replaceAll("_", " ");
+}
+
+function isClauseParagraph(section: Section) {
+  const title = section.title.trim();
+  const hasLongNumberedLead = /^([A-Z]\d+(?:\.\d+){2,}|\d+(?:\.\d+){2,})\s+.{24,}/.test(title);
+  const hasClauseContent = section.content.trim().startsWith(title.slice(0, 24));
+  return hasLongNumberedLead || hasClauseContent;
+}
+
+function renderInlineReferences(value: string) {
+  const parts = value.split(/((?:Section\s+)?(?:[A-Z]\d+|\d+)(?:\.\d+){1,4})/g);
+  return parts.map((part, index) => {
+    if (/^(?:Section\s+)?(?:[A-Z]\d+|\d+)(?:\.\d+){1,4}$/.test(part)) {
+      return (
+        <mark className="xref" key={`${part}-${index}`}>
+          {part}
+        </mark>
+      );
+    }
+    return part;
+  });
 }
 
 function replaceSection(sections: Section[], next: Section): Section[] {
