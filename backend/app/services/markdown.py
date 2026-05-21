@@ -161,6 +161,10 @@ def normalize_mineru_media(item: dict) -> str:
 
 
 def normalize_mineru_text(item: dict) -> str:
+    if item.get("type") == "list":
+        list_items = item.get("list_items")
+        if isinstance(list_items, list):
+            return "\n".join(f"- {str(list_item).strip()}" for list_item in list_items if str(list_item).strip())
     text = item.get("text") or ""
     text = re.sub(r"\s+", " ", str(text)).strip()
     return text
@@ -219,7 +223,9 @@ def trim_section_title(text: str) -> str:
 
 
 def is_clause_paragraph_heading(text: str, text_level: int | None) -> bool:
-    return text_level is None and bool(NUMBERED_HEADING_RE.match(text))
+    if text_level is not None:
+        return False
+    return bool(NUMBERED_HEADING_RE.match(text) or ALPHA_NUMBERED_HEADING_RE.match(text))
 
 
 def update_heading_path(path_by_level: dict[int, str], level: int, title: str) -> list[str]:

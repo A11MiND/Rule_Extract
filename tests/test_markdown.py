@@ -105,3 +105,26 @@ def test_parse_mineru_content_sections_preserves_media_and_tables(tmp_path):
     assert "[[MINERU_TABLE_MD|scatter]]" in sections[-1].content
     assert "[[MINERU_TABLE_HTML]]" in sections[-1].content
     assert "<table><tr><td>Description</td><td>Value</td></tr></table>" in sections[-1].content
+
+
+def test_parse_mineru_content_sections_preserves_lists_and_alpha_clause_paragraphs(tmp_path):
+    content_list = [
+        {"type": "text", "text": "1 EXECUTIVE SUMMARY ", "text_level": 1},
+        {"type": "text", "text": "PART B – TERM SERVICE CONTRACT (TSC) ", "text_level": 1},
+        {"type": "text", "text": "B7 KNOWLEDGE SHARING AMONG NEC USERS ", "text_level": 1},
+        {
+            "type": "text",
+            "text": "B7.1 At present, there are several committees in the DEVB / WDs in relation to the adoption of NEC in public works projects: ",
+        },
+        {"type": "list", "list_items": ["Steering Committee on NEC Projects", "To oversee the implementation"]},
+        {"type": "text", "text": "B7.2 Knowledge sharing should be done in a coordinated manner."},
+    ]
+    path = tmp_path / "sample_content_list.json"
+    path.write_text(json.dumps(content_list), encoding="utf-8")
+
+    sections = parse_mineru_content_sections(path)
+
+    assert sections[-2].title.startswith("B7.1 At present")
+    assert sections[-2].content.startswith("B7.1 At present")
+    assert "- Steering Committee on NEC Projects" in sections[-2].content
+    assert sections[-1].content.startswith("B7.2 Knowledge sharing")

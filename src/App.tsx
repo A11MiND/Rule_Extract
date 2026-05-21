@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -61,14 +61,16 @@ export function App() {
   const [activeView, setActiveView] = useState<View>("import");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const previousStatusRef = useRef<string | null>(null);
 
   useEffect(() => {
     getRuntimeConfig().then(setRuntimeConfig).catch(() => undefined);
     getDocuments()
       .then((documents) => {
         if (documents.length) {
-          setDocumentJob(documents[0]);
-          setActiveView("processing");
+          const latestDocument = documents[0];
+          setDocumentJob(latestDocument);
+          setActiveView(latestDocument.status === "markdown_ready" ? "review" : "processing");
         }
       })
       .catch(() => undefined);
@@ -96,6 +98,15 @@ export function App() {
     }
     refreshDocumentData(documentJob.id);
   }, [documentJob?.id, documentJob?.status]);
+
+  useEffect(() => {
+    const previousStatus = previousStatusRef.current;
+    const nextStatus = documentJob?.status ?? null;
+    if (previousStatus && previousStatus !== "markdown_ready" && nextStatus === "markdown_ready") {
+      setActiveView("review");
+    }
+    previousStatusRef.current = nextStatus;
+  }, [documentJob?.status]);
 
   useEffect(() => {
     if (!documentJob || TERMINAL_STATUSES.has(documentJob.status)) {
@@ -198,6 +209,8 @@ export function App() {
         ))}
       </nav>
 
+      {documentJob ? <TopProgressBar documentJob={documentJob} /> : null}
+
       {error ? (
         <div className="alert" role="alert">
           <AlertCircle size={18} />
@@ -221,7 +234,12 @@ export function App() {
 
       {activeView === "review" && documentJob && READY_STATUSES.has(documentJob.status) ? (
         <section className="portal-page">
-          <MarkdownReview documentId={documentJob.id} sections={sections} onSectionsChange={setSections} />
+          <MarkdownReview
+            documentId={documentJob.id}
+            pdfUrl={documentJob.pdf_url}
+            sections={sections}
+            onSectionsChange={setSections}
+          />
           <ExportPanel documentId={documentJob.id} kinds={["markdown"]} />
         </section>
       ) : null}
@@ -452,12 +470,41 @@ function ProgressPanel({ documentJob, stats }: { documentJob: DocumentJob | null
   );
 }
 
+function TopProgressBar({ documentJob }: { documentJob: DocumentJob }) {
+  const steps = [
+    "mineru_queued",
+    "mineru_processing",
+    "markdown_ready",
+    "classifying_sections",
+    "extracting_rules",
+    "rules_extracted"
+  ];
+  const currentIndex = Math.max(0, steps.indexOf(documentJob.status));
+  const progress = documentJob.status.includes("failed")
+    ? 100
+    : Math.round(((currentIndex + 1) / steps.length) * 100);
+
+  return (
+    <section className="top-progress" aria-label="Document processing progress">
+      <div className="top-progress-meta">
+        <span>Document #{documentJob.id}</span>
+        <span>{labelStatus(documentJob.status)}</span>
+      </div>
+      <div className={`top-progress-bar ${documentJob.status.includes("failed") ? "failed" : ""}`}>
+        <span style={{ width: `${progress}%` }} />
+      </div>
+    </section>
+  );
+}
+
 function MarkdownReview({
   documentId,
+  pdfUrl,
   sections,
   onSectionsChange
 }: {
   documentId: number;
+  pdfUrl: string;
   sections: Section[];
   onSectionsChange: (sections: Section[]) => void;
 }) {
@@ -467,15 +514,20 @@ function MarkdownReview({
         <FileText size={20} />
         <h2>Document Preview</h2>
       </div>
-      <div className="document-preview" aria-label="Patched MinerU Markdown preview">
-        {sections.map((section) => (
-          <SectionPreview
-            key={section.id}
-            documentId={documentId}
-            section={section}
-            onSaved={(next) => onSectionsChange(replaceSection(sections, next))}
-          />
-        ))}
+      <div className="review-split">
+        <section className="pdf-review-pane" aria-label="Source PDF preview">
+          <iframe src={pdfUrl} title="Source PDF" />
+        </section>
+        <div className="document-preview" aria-label="Patched MinerU Markdown preview">
+          {sections.map((section) => (
+            <SectionPreview
+              key={section.id}
+              documentId={documentId}
+              section={section}
+              onSaved={(next) => onSectionsChange(replaceSection(sections, next))}
+            />
+          ))}
+        </div>
       </div>
     </section>
   );
@@ -838,7 +890,7 @@ function exportLabel(kind: string) {
 
 function isClauseParagraph(section: Section) {
   const title = section.title.trim();
-  const hasLongNumberedLead = /^([A-Z]\d+(?:\.\d+){2,}|\d+(?:\.\d+){2,})\s+.{24,}/.test(title);
+  const hasLongNumberedLead = /^([A-Z]\d+(?:\.\d+)+|\d+(?:\.\d+)+)\s+.{24,}/.test(title);
   const hasClauseContent = section.content.trim().startsWith(title.slice(0, 24));
   return hasLongNumberedLead || hasClauseContent;
 }

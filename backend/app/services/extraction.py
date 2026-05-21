@@ -4,6 +4,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 import hashlib
+from pathlib import Path
 import re
 from typing import Any
 
@@ -13,7 +14,7 @@ from .. import models
 from ..runtime_config import clamp_concurrency
 from ..schemas import RuleBase
 from .artifacts import document_storage_dir
-from .llm import LLMClient, LLMError
+from .llm import LLMClient
 
 
 CLASSIFY_SYSTEM_PROMPT = """You classify sections from NEC public works Practice Notes.
@@ -233,8 +234,8 @@ def append_llm_window_log(document_id: int, entry: dict[str, Any]) -> None:
         handle.write(json.dumps(safe_entry, ensure_ascii=False) + "\n")
 
 
-def llm_windows_path(document_id: int) -> str:
-    return str(document_storage_dir(document_id) / "llm_windows.jsonl")
+def llm_windows_path(document_id: int) -> Path:
+    return document_storage_dir(document_id) / "llm_windows.jsonl"
 
 
 def update_window_progress(
@@ -246,7 +247,7 @@ def update_window_progress(
     manifest = dict(document.artifact_manifest or {})
     manifest["llm_windows_completed"] = int(manifest.get("llm_windows_completed") or 0) + completed_delta
     manifest["llm_window_failures"] = int(manifest.get("llm_window_failures") or 0) + failure_delta
-    manifest["llm_windows_path"] = llm_windows_path(document.id)
+    manifest["llm_windows_path"] = str(llm_windows_path(document.id))
     document.artifact_manifest = manifest
     db.commit()
 
@@ -256,7 +257,7 @@ def set_window_totals(db: Session, document: models.Document, total: int) -> Non
     manifest["llm_windows_total"] = total
     manifest["llm_windows_completed"] = 0
     manifest["llm_window_failures"] = 0
-    manifest["llm_windows_path"] = llm_windows_path(document.id)
+    manifest["llm_windows_path"] = str(llm_windows_path(document.id))
     document.artifact_manifest = manifest
     db.commit()
 
