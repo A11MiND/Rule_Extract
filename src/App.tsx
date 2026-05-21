@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -8,8 +8,10 @@ import {
   Edit3,
   FileText,
   GitBranch,
+  History as HistoryIcon,
   Loader2,
   Play,
+  Plus,
   Save,
   SearchCheck,
   Settings
@@ -45,7 +47,8 @@ const READY_STATUSES = new Set([
   "rule_extraction_queued",
   "classifying_sections",
   "extracting_rules",
-  "rules_extracted"
+  "rules_extracted",
+  "rule_extraction_failed"
 ]);
 const TERMINAL_STATUSES = new Set(["mineru_failed", "rule_extraction_failed", "rules_extracted"]);
 const VIEWS = ["import", "processing", "review", "rules", "map"] as const;
@@ -53,6 +56,7 @@ type View = (typeof VIEWS)[number];
 
 export function App() {
   const [documentJob, setDocumentJob] = useState<DocumentJob | null>(null);
+  const [documents, setDocuments] = useState<DocumentJob[]>([]);
   const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig | null>(null);
   const [stats, setStats] = useState<DocumentStats | null>(null);
   const [sections, setSections] = useState<Section[]>([]);
@@ -63,18 +67,24 @@ export function App() {
   const [error, setError] = useState("");
   const previousStatusRef = useRef<string | null>(null);
 
+  const loadDocuments = useCallback(async () => {
+    const nextDocuments = await getDocuments();
+    setDocuments(nextDocuments);
+    return nextDocuments;
+  }, []);
+
   useEffect(() => {
     getRuntimeConfig().then(setRuntimeConfig).catch(() => undefined);
-    getDocuments()
+    loadDocuments()
       .then((documents) => {
         if (documents.length) {
           const latestDocument = documents[0];
           setDocumentJob(latestDocument);
-          setActiveView(latestDocument.status === "markdown_ready" ? "review" : "processing");
+          setActiveView(defaultViewForStatus(latestDocument.status));
         }
       })
       .catch(() => undefined);
-  }, []);
+  }, [loadDocuments]);
 
   useEffect(() => {
     if (!documentJob || TERMINAL_STATUSES.has(documentJob.status)) {
@@ -87,6 +97,7 @@ export function App() {
       });
       if (next) {
         setDocumentJob(next);
+        setDocuments((current) => current.map((document) => (document.id === next.id ? next : document)));
       }
     }, 2500);
     return () => window.clearInterval(timer);
@@ -115,6 +126,28 @@ export function App() {
     const timer = window.setInterval(() => {
       getDocumentStats(documentJob.id).then(setStats).catch(() => undefined);
     }, 2000);
+    return () => window.clearInterval(timer);
+  }, [documentJob?.id, documentJob?.status]);
+
+  useEffect(() => {
+    if (
+      !documentJob ||
+      !["rule_extraction_queued", "classifying_sections", "extracting_rules"].includes(documentJob.status)
+    ) {
+      return;
+    }
+    const refreshRuleOutputs = async () => {
+      const [nextRules, nextGraph, nextStats] = await Promise.all([
+        getRules(documentJob.id).catch(() => []),
+        getRuleGraph(documentJob.id).catch(() => ({ nodes: [], edges: [] })),
+        getDocumentStats(documentJob.id).catch(() => null)
+      ]);
+      setRules(nextRules);
+      setGraph(nextGraph);
+      if (nextStats) setStats(nextStats);
+    };
+    refreshRuleOutputs();
+    const timer = window.setInterval(refreshRuleOutputs, 2500);
     return () => window.clearInterval(timer);
   }, [documentJob?.id, documentJob?.status]);
 
@@ -150,6 +183,7 @@ export function App() {
     try {
       const created = await createDocument(payload);
       setDocumentJob(created);
+      setDocuments((current) => [created, ...current.filter((document) => document.id !== created.id)]);
       setActiveView("processing");
       setSections([]);
       setRules([]);
@@ -166,6 +200,8 @@ export function App() {
     if (!documentJob) return;
     setBusy(true);
     setError("");
+    setRules([]);
+    setGraph({ nodes: [], edges: [] });
     try {
       await extractRules(documentJob.id);
       setActiveView("processing");
@@ -184,6 +220,41 @@ export function App() {
     }
   }
 
+  async function handleSelectDocument(documentId: number) {
+    if (!documentId) return;
+    setBusy(true);
+    setError("");
+    try {
+      const selected = await getDocument(documentId);
+      setDocumentJob(selected);
+      previousStatusRef.current = selected.status;
+      setActiveView(defaultViewForStatus(selected.status));
+      setSections([]);
+      setRules([]);
+      setGraph({ nodes: [], edges: [] });
+      setStats(null);
+      if (READY_STATUSES.has(selected.status)) {
+        refreshDocumentData(selected.id);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load document history");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleNewWork() {
+    setDocumentJob(null);
+    setActiveView("import");
+    setSections([]);
+    setRules([]);
+    setGraph({ nodes: [], edges: [] });
+    setStats(null);
+    setError("");
+    previousStatusRef.current = null;
+    loadDocuments().catch(() => undefined);
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -192,6 +263,26 @@ export function App() {
           <h1>Rule Extraction Portal</h1>
         </div>
         <div className="topbar-actions">
+          <button className="secondary-button" type="button" onClick={handleNewWork}>
+            <Plus size={16} />
+            New Work
+          </button>
+          <label className="history-picker">
+            <HistoryIcon size={16} />
+            <select
+              aria-label="Document history"
+              disabled={!documents.length || busy}
+              value={documentJob?.id ?? ""}
+              onChange={(event) => handleSelectDocument(Number(event.target.value))}
+            >
+              <option value="">History</option>
+              {documents.map((document) => (
+                <option key={document.id} value={document.id}>
+                  #{document.id} {document.name} - {labelStatus(document.status)}
+                </option>
+              ))}
+            </select>
+          </label>
           <StatusBadge status={documentJob?.status ?? "idle"} />
         </div>
       </header>
@@ -436,16 +527,12 @@ function ProgressPanel({ documentJob, stats }: { documentJob: DocumentJob | null
     "rules_extracted"
   ];
   const currentIndex = documentJob ? steps.indexOf(documentJob.status) : -1;
-  const progress = currentIndex < 0 ? 0 : Math.round(((currentIndex + 1) / steps.length) * 100);
 
   return (
     <section className="panel processing-hud">
       <div className="panel-title">
         <SearchCheck size={20} />
         <h2>Processing</h2>
-      </div>
-      <div className="hud-progress" aria-label="Processing progress">
-        <span style={{ width: `${progress}%` }} />
       </div>
       <ol className="timeline horizontal">
         {steps.map((step, index) => (
@@ -868,6 +955,13 @@ function ExportPanel({ documentId, kinds }: { documentId: number; kinds: string[
 
 function labelStatus(status: string) {
   return status.replaceAll("_", " ");
+}
+
+function defaultViewForStatus(status: string): View {
+  if (status === "markdown_ready") return "review";
+  if (["rule_extraction_queued", "classifying_sections", "extracting_rules"].includes(status)) return "processing";
+  if (["rules_extracted", "rule_extraction_failed"].includes(status)) return "rules";
+  return "processing";
 }
 
 function viewLabel(view: View) {

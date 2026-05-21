@@ -83,6 +83,8 @@ textarea {
   align-items: center;
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .eyebrow {
@@ -234,6 +236,34 @@ label {
   color: #ffffff;
   font-weight: 800;
   justify-content: center;
+}
+
+.secondary-button {
+  border-color: #9fc9ec;
+  color: var(--hkpc-blue-dark);
+  font-weight: 800;
+}
+
+.history-picker {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #9fc9ec;
+  border-radius: 6px;
+  color: var(--hkpc-blue-dark);
+  display: inline-flex;
+  flex-direction: row;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.history-picker select {
+  border: 0;
+  color: var(--hkpc-blue-dark);
+  font-weight: 800;
+  min-height: 34px;
+  padding: 4px 2px;
+  width: min(360px, 32vw);
 }
 
 .status-badge {
@@ -741,6 +771,21 @@ label {
 
   .view-tabs {
     flex-wrap: wrap;
+  }
+
+  .topbar {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .topbar-actions {
+    justify-content: flex-start;
+    width: 100%;
+  }
+
+  .history-picker select {
+    width: min(100%, 320px);
   }
 
   .config-grid {
