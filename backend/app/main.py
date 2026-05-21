@@ -11,7 +11,7 @@ from .database import SessionLocal, get_db, init_db
 from .services.artifacts import extract_zip, write_zip
 from .services.extraction import classify_sections, extract_rules
 from .services.llm import DoubaoClient, LLMError
-from .services.markdown import build_section_tree, parse_markdown_sections
+from .services.markdown import build_section_tree, parse_markdown_sections, parse_mineru_content_sections
 from .services.mineru import MinerUClient, MinerUError
 
 
@@ -209,7 +209,12 @@ def run_mineru_pipeline(document_id: int) -> None:
         document.zip_path = str(zip_path)
         document.markdown_path = markdown_path
         document.artifact_manifest = {**manifest, "mineru_raw": result.raw, "zip_url": result.zip_url}
-        persist_sections_from_markdown(db, document, Path(markdown_path).read_text(encoding="utf-8"))
+        persist_sections_from_artifacts(
+            db,
+            document,
+            markdown=Path(markdown_path).read_text(encoding="utf-8"),
+            manifest=manifest,
+        )
         document.status = "markdown_ready"
         db.commit()
     except (MinerUError, Exception) as exc:
@@ -245,9 +250,14 @@ def run_rule_extraction_pipeline(document_id: int) -> None:
         db.close()
 
 
-def persist_sections_from_markdown(db: Session, document: models.Document, markdown: str) -> None:
+def persist_sections_from_artifacts(
+    db: Session,
+    document: models.Document,
+    markdown: str,
+    manifest: dict,
+) -> None:
     db.query(models.Section).filter(models.Section.document_id == document.id).delete()
-    parsed_sections = parse_markdown_sections(markdown)
+    parsed_sections = parse_sections_from_manifest(manifest) or parse_markdown_sections(markdown)
     for section in parsed_sections:
         db.add(
             models.Section(
@@ -261,6 +271,26 @@ def persist_sections_from_markdown(db: Session, document: models.Document, markd
             )
         )
     db.commit()
+
+
+def persist_sections_from_markdown(db: Session, document: models.Document, markdown: str) -> None:
+    persist_sections_from_artifacts(db, document, markdown=markdown, manifest={})
+
+
+def parse_sections_from_manifest(manifest: dict) -> list | None:
+    json_paths = manifest.get("json_paths") or []
+    content_list_paths = [
+        Path(path)
+        for path in json_paths
+        if Path(path).name.endswith("_content_list.json")
+        and not Path(path).name.endswith("_content_list_v2.json")
+    ]
+    for path in content_list_paths:
+        if path.exists():
+            sections = parse_mineru_content_sections(path)
+            if sections:
+                return sections
+    return None
 
 
 def build_schema_tree(sections: list[schemas.SectionRead]) -> list[schemas.SectionRead]:
