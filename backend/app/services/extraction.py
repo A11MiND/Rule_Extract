@@ -60,23 +60,35 @@ def classify_sections(
     concurrency: int = 8,
 ) -> None:
     sections = list(document.sections)
-    for batch_index, batch in enumerate(chunked(sections, CLASSIFICATION_BATCH_SIZE), start=1):
-        prompt = build_classification_prompt(batch)
-        entry: dict[str, Any] = {
-            "kind": "classification",
-            "batch_index": batch_index,
-            "section_ids": [section.id for section in batch],
-            "prompt": prompt,
-            "status": "completed",
+    batches = chunked(sections, CLASSIFICATION_BATCH_SIZE)
+    set_window_totals(db, document, total=len(batches))
+    max_workers = clamp_concurrency(concurrency)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(classify_section_window, llm, batch, batch_index): (batch_index, batch)
+            for batch_index, batch in enumerate(batches, start=1)
         }
-        try:
-            result = llm.complete_json(CLASSIFY_SYSTEM_PROMPT, prompt)
-            entry["response"] = result
-            by_id = {
-                item.get("id"): item
-                for item in result.get("sections", [])
-                if isinstance(item, dict)
-            }
+        for future in as_completed(futures):
+            batch_index, batch = futures[future]
+            try:
+                result, entry = future.result()
+                by_id = {
+                    item.get("id"): item
+                    for item in result.get("sections", [])
+                    if isinstance(item, dict)
+                }
+                failure_delta = 0
+            except Exception as exc:
+                entry = {
+                    "kind": "classification",
+                    "batch_index": batch_index,
+                    "section_ids": [section.id for section in batch],
+                    "prompt": build_classification_prompt(batch),
+                    "status": "failed",
+                    "error": str(exc),
+                }
+                by_id = {}
+                failure_delta = 1
             for section in batch:
                 item = by_id.get(section.id) or {}
                 classification = str(item.get("classification") or "")
@@ -93,13 +105,8 @@ def classify_sections(
                     confidence = coerce_confidence(item.get("confidence"))
                 section.classification = classification
                 section.classification_confidence = confidence
-        except Exception as exc:
-            entry["status"] = "failed"
-            entry["error"] = str(exc)
-            for section in batch:
-                section.classification, section.classification_confidence = classify_section_heuristic(section)
-        append_llm_window_log(document.id, entry)
-        update_window_progress(db, document, completed_delta=1)
+            append_llm_window_log(document.id, entry)
+            update_window_progress(db, document, completed_delta=1, failure_delta=failure_delta)
     db.commit()
 
 
@@ -201,6 +208,24 @@ def extract_rule_window(
     result = llm.complete_json(EXTRACT_SYSTEM_PROMPT, prompt)
     entry = {
         "kind": "extraction",
+        "batch_index": batch_index,
+        "section_ids": [section.id for section in batch],
+        "prompt": prompt,
+        "response": result,
+        "status": "completed",
+    }
+    return result, entry
+
+
+def classify_section_window(
+    llm: LLMClient,
+    batch: list[models.Section],
+    batch_index: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    prompt = build_classification_prompt(batch)
+    result = llm.complete_json(CLASSIFY_SYSTEM_PROMPT, prompt)
+    entry = {
+        "kind": "classification",
         "batch_index": batch_index,
         "section_ids": [section.id for section in batch],
         "prompt": prompt,

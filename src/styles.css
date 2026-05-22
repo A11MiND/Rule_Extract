@@ -481,6 +481,85 @@ label {
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }
 
+.logic-map {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.section-flow {
+  background: #ffffff;
+  border: 1px solid #c7dced;
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.section-flow > header {
+  align-items: center;
+  border-bottom: 1px solid #d9e8f4;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding-bottom: 10px;
+}
+
+.section-flow > header > span {
+  color: #586b7b;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.section-rule-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.rule-flow {
+  background: #f8fbfe;
+  border: 1px solid #d5e5f2;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.rule-flow-header {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.rule-flow-header span,
+.logic-branch > span {
+  color: #62706c;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.logic-branch {
+  border-left: 3px solid #9bc7ea;
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  padding-left: 10px;
+}
+
+.logic-branch p {
+  align-items: center;
+  color: #33423f;
+  display: flex;
+  gap: 6px;
+  margin: 0;
+}
+
+.logic-branch .unresolved-reference {
+  background: #fff4ed;
+  border: 1px solid #ffb199;
+  border-radius: 6px;
+  color: #9a3412;
+  padding: 6px 8px;
+}
+
 .document-preview {
   background: #ffffff;
   color: #1d2523;

@@ -1,5 +1,4 @@
 import type {
-  ContractFamily,
   DocumentJob,
   DocumentStats,
   Rule,
@@ -24,7 +23,6 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 export function createDocument(payload: {
   name: string;
   pdf_url: string;
-  contract_family: ContractFamily;
 }) {
   return request<DocumentJob>("/api/documents", {
     method: "POST",

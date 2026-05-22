@@ -32,7 +32,6 @@ import {
   saveSection
 } from "./api";
 import type {
-  ContractFamily,
   DocumentJob,
   DocumentStats,
   Rule,
@@ -177,7 +176,7 @@ export function App() {
     }
   }
 
-  async function handleCreate(payload: { name: string; pdf_url: string; contract_family: ContractFamily }) {
+  async function handleCreate(payload: { name: string; pdf_url: string }) {
     setBusy(true);
     setError("");
     try {
@@ -378,13 +377,12 @@ function ImportPanel({
   busy,
   runtimeConfig
 }: {
-  onCreate: (payload: { name: string; pdf_url: string; contract_family: ContractFamily }) => void;
+  onCreate: (payload: { name: string; pdf_url: string }) => void;
   busy: boolean;
   runtimeConfig: RuntimeConfig | null;
 }) {
   const [name, setName] = useState("NEC Practice Note Demo");
   const [pdfUrl, setPdfUrl] = useState("");
-  const [contractFamily, setContractFamily] = useState<ContractFamily>("Generic");
 
   return (
     <section className="panel">
@@ -396,7 +394,7 @@ function ImportPanel({
         className="form-stack"
         onSubmit={(event) => {
           event.preventDefault();
-          onCreate({ name, pdf_url: pdfUrl, contract_family: contractFamily });
+          onCreate({ name, pdf_url: pdfUrl });
         }}
       >
         <label>
@@ -412,14 +410,6 @@ function ImportPanel({
             required
             type="url"
           />
-        </label>
-        <label>
-          Contract family
-          <select value={contractFamily} onChange={(event) => setContractFamily(event.target.value as ContractFamily)}>
-            <option value="Generic">Generic</option>
-            <option value="ECC">ECC</option>
-            <option value="TSC">TSC</option>
-          </select>
         </label>
         <button className="primary-button" type="submit" disabled={busy}>
           {busy ? <Loader2 className="spin" size={18} /> : <ChevronRight size={18} />}
@@ -559,7 +549,6 @@ function ProgressPanel({ documentJob, stats }: { documentJob: DocumentJob | null
       {documentJob ? (
         <div className="job-meta">
           <span>Document #{documentJob.id}</span>
-          <span>{documentJob.contract_family}</span>
           {documentJob.mineru_task_id ? <span>MinerU {documentJob.mineru_task_id}</span> : null}
         </div>
       ) : (
@@ -847,8 +836,8 @@ function RuleCard({ rule, onSaved }: { rule: Rule; onSaved: (rule: Rule) => void
       <p className="evidence">{draft.source.evidence_text || "No evidence text supplied."}</p>
       {draft.options.length ? (
         <ul className="option-list">
-          {draft.options.map((option) => (
-            <li key={`${draft.id}-${option.label}`}>{option.label}: {option.condition || option.action}</li>
+            {draft.options.map((option, index) => (
+              <li key={`${draft.id}-${option.label}-${index}`}>{option.label}: {option.condition || option.action}</li>
           ))}
         </ul>
       ) : null}
@@ -881,46 +870,100 @@ function RuleMap({
   rules: Rule[];
   sections: Section[];
 }) {
+  const flatSections = useMemo(() => flattenSections(sections), [sections]);
   const nodeById = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph.nodes]);
-  const sectionTitleById = useMemo(() => flattenSections(sections).reduce((map, section) => map.set(section.id, section.title), new Map<string, string>()), [sections]);
+  const sectionById = useMemo(() => flatSections.reduce((map, section) => map.set(section.id, section), new Map<string, Section>()), [flatSections]);
+  const sectionByCode = useMemo(() => {
+    const map = new Map<string, Section>();
+    for (const section of flatSections) {
+      const code = sectionCode(section);
+      if (code) map.set(code.toUpperCase(), section);
+    }
+    return map;
+  }, [flatSections]);
+  const rulesBySection = useMemo(() => {
+    const map = new Map<string, Rule[]>();
+    for (const rule of rules) {
+      const sectionId = rule.section_id || rule.source.section_id || "unknown";
+      map.set(sectionId, [...(map.get(sectionId) ?? []), rule]);
+    }
+    return [...map.entries()].sort(([left], [right]) => {
+      const leftSection = sectionById.get(left);
+      const rightSection = sectionById.get(right);
+      return (leftSection?.position ?? Number.MAX_SAFE_INTEGER) - (rightSection?.position ?? Number.MAX_SAFE_INTEGER);
+    });
+  }, [rules, sectionById]);
 
   return (
     <section className="panel tall-panel">
       <div className="panel-title">
         <GitBranch size={20} />
-        <h2>Rule Map</h2>
+        <h2>Rule Logic Review</h2>
       </div>
       <ExportPanel documentId={documentId} kinds={["rule-graph"]} />
-      {graph.nodes.length === 0 ? <p className="muted">Dependencies and option paths will appear here.</p> : null}
-      <div className="relationship-map">
-        {rules.map((rule) => (
-          <div className="flow-node" key={rule.id}>
-            <div>
-              <strong>{rule.subject || rule.action || rule.id}</strong>
-              <span>{rule.type}</span>
-            </div>
-            <p>
-              Section <ChevronRight size={14} /> {sectionTitleById.get(rule.section_id || "") || rule.section_id || "unknown"}
-            </p>
-            {rule.options.map((option) => (
-              <p key={`${rule.id}-${option.label}`}>
-                option {option.label || "path"} <ChevronRight size={14} /> {option.action || option.condition || "related path"}
-              </p>
-            ))}
-            {rule.dependencies.map((dependency) => (
-              <p key={`${rule.id}-${dependency.type}-${dependency.rule_id}-${dependency.reason}`}>
-                {dependency.type} <ChevronRight size={14} /> {dependency.rule_id ? nodeById.get(dependency.rule_id)?.label ?? dependency.rule_id : dependency.reason}
-              </p>
-            ))}
-            {graph.edges
-              .filter((edge) => edge.source === rule.id)
-              .map((edge) => (
-                <p key={`${edge.source}-${edge.target}-${edge.label}`}>
-                  {edge.label} <ChevronRight size={14} /> {nodeById.get(edge.target)?.label ?? edge.target}
-                </p>
-              ))}
-          </div>
-        ))}
+      {rules.length === 0 ? <p className="muted">Rule logic will appear here after extraction.</p> : null}
+      <div className="logic-map">
+        {rulesBySection.map(([sectionId, sectionRules]) => {
+          const section = sectionById.get(sectionId);
+          return (
+            <article className="section-flow" key={sectionId}>
+              <header>
+                <strong>{section?.title || sectionId}</strong>
+                <span>{sectionRules.length} rules</span>
+              </header>
+              <div className="section-rule-list">
+                {sectionRules.map((rule) => {
+                  const refs = ruleReferences(rule, sectionByCode, section);
+                  return (
+                    <div className="rule-flow" key={rule.id}>
+                      <div className="rule-flow-header">
+                        <strong>{rule.subject || rule.action || rule.id}</strong>
+                        <span>{rule.type}</span>
+                      </div>
+                      {rule.options.length ? (
+                        <div className="logic-branch">
+                          <span>Options</span>
+                          {rule.options.map((option, index) => (
+                            <p key={`${rule.id}-${option.label}-${option.action}-${index}`}>
+                              {option.label || "path"} <ChevronRight size={14} /> {option.action || option.condition || "related path"}
+                            </p>
+                          ))}
+                        </div>
+                      ) : null}
+                      {refs.length ? (
+                        <div className="logic-branch">
+                          <span>References</span>
+                          {refs.map((reference) => (
+                            <p className={reference.resolved ? "" : "unresolved-reference"} key={`${rule.id}-${reference.code}`}>
+                              {reference.code} <ChevronRight size={14} /> {reference.resolved ? reference.title : "unresolved section"}
+                            </p>
+                          ))}
+                        </div>
+                      ) : null}
+                      {rule.dependencies.length || graph.edges.some((edge) => edge.source === rule.id) ? (
+                        <div className="logic-branch">
+                          <span>Rule links</span>
+                          {rule.dependencies.map((dependency, index) => (
+                            <p key={`${rule.id}-${dependency.type}-${dependency.rule_id}-${dependency.reason}-${index}`}>
+                              {dependency.type} <ChevronRight size={14} /> {dependency.rule_id ? nodeById.get(dependency.rule_id)?.label ?? dependency.rule_id : dependency.reason}
+                            </p>
+                          ))}
+                          {graph.edges
+                            .filter((edge) => edge.source === rule.id)
+                            .map((edge, index) => (
+                              <p key={`${edge.source}-${edge.target}-${edge.label}-${index}`}>
+                                {edge.label} <ChevronRight size={14} /> {nodeById.get(edge.target)?.label ?? edge.target}
+                              </p>
+                            ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })}
+              </div>
+            </article>
+          );
+        })}
       </div>
     </section>
   );
@@ -987,13 +1030,14 @@ function viewLabel(view: View) {
     processing: "Processing",
     review: "Document Review",
     rules: "Rules",
-    map: "Rule Map"
+    map: "Rule Logic Review"
   };
   return labels[view];
 }
 
 function exportLabel(kind: string) {
   if (kind === "source-pdf") return "Source PDF";
+  if (kind === "rule-graph") return "Rule Logic JSON";
   return kind
     .split("-")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -1151,6 +1195,42 @@ function sanitizeTableHtml(html: string) {
 
 function flattenSections(sections: Section[]): Section[] {
   return sections.flatMap((section) => [section, ...flattenSections(section.children)]);
+}
+
+function sectionCode(section?: Section) {
+  if (!section) return "";
+  const candidates = [section.title, ...section.heading_path].reverse();
+  for (const candidate of candidates) {
+    const match = candidate.match(/\b([A-Z]?\d+(?:\.\d+){0,5})\b/i);
+    if (match) return match[1].toUpperCase();
+  }
+  return "";
+}
+
+function ruleReferences(rule: Rule, sectionByCode: Map<string, Section>, currentSection?: Section) {
+  const ownCode = sectionCode(currentSection);
+  const text = [
+    rule.subject,
+    rule.condition,
+    rule.action,
+    rule.notes,
+    rule.source.evidence_text,
+    ...rule.options.flatMap((option) => [option.label, option.condition, option.action, ...option.referenced_sections]),
+    ...rule.dependencies.map((dependency) => dependency.reason)
+  ].join("\n");
+  const refs = new Set<string>();
+  for (const match of text.matchAll(/\b(?:Section\s+)?([A-Z]\d+(?:\.\d+){1,5}|\d+(?:\.\d+){1,5})\b/gi)) {
+    const code = match[1].toUpperCase();
+    if (code !== ownCode) refs.add(code);
+  }
+  return [...refs].map((code) => {
+    const section = sectionByCode.get(code);
+    return {
+      code,
+      resolved: Boolean(section),
+      title: section?.title || ""
+    };
+  });
 }
 
 function replaceSection(sections: Section[], next: Section): Section[] {

@@ -1,10 +1,8 @@
-export type ContractFamily = "ECC" | "TSC" | "Generic";
-
 export interface DocumentJob {
   id: number;
   name: string;
   pdf_url: string;
-  contract_family: ContractFamily;
+  contract_family: string;
   status: string;
   mineru_task_id?: string | null;
   mineru_state?: string | null;
