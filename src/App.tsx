@@ -255,6 +255,14 @@ export function App() {
     loadDocuments().catch(() => undefined);
   }
 
+  const canExtractRules =
+    documentJob &&
+    activeView !== "import" &&
+    (documentJob.status === "markdown_ready" ||
+      documentJob.status === "rule_extraction_failed" ||
+      (documentJob.status === "rules_extracted" && (stats?.rules_extracted ?? rules.length) === 0));
+  const extractButtonLabel = documentJob?.status === "markdown_ready" ? "Extract Rules" : "Retry Extract Rules";
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -353,11 +361,11 @@ export function App() {
         </section>
       ) : null}
 
-      {documentJob && ["markdown_ready", "rule_extraction_failed"].includes(documentJob.status) && activeView !== "import" ? (
+      {canExtractRules ? (
         <div className="action-bar">
           <button className="primary-button" onClick={handleExtract} disabled={busy}>
             {busy ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
-            {documentJob.status === "rule_extraction_failed" ? "Retry Extract Rules" : "Extract Rules"}
+            {extractButtonLabel}
           </button>
         </div>
       ) : null}

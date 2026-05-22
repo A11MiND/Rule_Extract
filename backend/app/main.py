@@ -121,14 +121,10 @@ def get_source_pdf(document_id: int, db: Session = Depends(get_db)) -> FileRespo
         if path.exists():
             return FileResponse(path, media_type="application/pdf", filename=f"document-{document_id}.pdf")
 
-    try:
-        path = download_source_pdf(document.id, document.pdf_url)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Unable to load source PDF: {exc}") from exc
-
-    document.artifact_manifest = {**manifest, "source_pdf_path": str(path)}
-    db.commit()
-    return FileResponse(path, media_type="application/pdf", filename=f"document-{document_id}.pdf")
+    raise HTTPException(
+        status_code=404,
+        detail="Source PDF has not been cached yet. Start a new import or wait for MinerU artifacts.",
+    )
 
 
 @app.put("/api/documents/{document_id}/sections/{section_id}", response_model=schemas.SectionRead)
@@ -369,6 +365,22 @@ def run_mineru_pipeline(document_id: int) -> None:
         }
         document.artifact_manifest = {**(document.artifact_manifest or {}), "mineru_request": mineru_request}
         db.commit()
+
+        try:
+            source_pdf_path = download_source_pdf(document.id, document.pdf_url)
+            document.artifact_manifest = {
+                **(document.artifact_manifest or {}),
+                "source_pdf_path": str(source_pdf_path),
+                "source_pdf_cached_at": datetime.now(timezone.utc).isoformat(),
+            }
+            db.commit()
+        except Exception as exc:
+            document.artifact_manifest = {
+                **(document.artifact_manifest or {}),
+                "source_pdf_error": str(exc),
+            }
+            db.commit()
+
         task_id = client.submit_task(document.pdf_url)
         document.mineru_task_id = task_id
         document.status = "mineru_processing"
@@ -385,11 +397,17 @@ def run_mineru_pipeline(document_id: int) -> None:
 
         document.zip_path = str(zip_path)
         document.markdown_path = markdown_path
-        document.artifact_manifest = {
-            **(document.artifact_manifest or {}),
+        previous_manifest = dict(document.artifact_manifest or {})
+        combined_manifest = {
+            **previous_manifest,
             **manifest,
             "mineru_raw": result.raw,
             "zip_url": result.zip_url,
+        }
+        if not combined_manifest.get("source_pdf_path") and previous_manifest.get("source_pdf_path"):
+            combined_manifest["source_pdf_path"] = previous_manifest["source_pdf_path"]
+        document.artifact_manifest = {
+            **combined_manifest,
         }
         persist_sections_from_artifacts(
             db,

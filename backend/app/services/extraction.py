@@ -175,7 +175,18 @@ def extract_rules(
                         )
                         update_window_progress(db, document, failure_delta=1)
 
-    document.status = "rules_extracted"
+    manifest = dict(document.artifact_manifest or {})
+    failures = int(manifest.get("llm_window_failures") or 0)
+    total = int(manifest.get("llm_windows_total") or len(batches))
+    if saved == 0 and failures:
+        document.status = "rule_extraction_failed"
+        document.error_message = (
+            f"Rule extraction produced no rules. {failures}/{total or failures} LLM windows failed; "
+            "check the configured LLM API/base URL and network connectivity."
+        )
+    else:
+        document.status = "rules_extracted"
+        document.error_message = None
     db.commit()
     return saved
 
