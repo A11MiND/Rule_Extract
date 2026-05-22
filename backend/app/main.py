@@ -110,7 +110,7 @@ def get_outline(document_id: int, db: Session = Depends(get_db)) -> list[schemas
 
 
 @app.get("/api/documents/{document_id}/source-pdf")
-def get_source_pdf(document_id: int, db: Session = Depends(get_db)) -> FileResponse:
+def get_source_pdf(document_id: int, download: bool = False, db: Session = Depends(get_db)) -> FileResponse:
     document = require_document(db, document_id)
     manifest = dict(document.artifact_manifest or {})
     candidates = []
@@ -119,7 +119,12 @@ def get_source_pdf(document_id: int, db: Session = Depends(get_db)) -> FileRespo
     candidates.extend(Path(path) for path in manifest.get("files", []) if str(path).lower().endswith(".pdf"))
     for path in candidates:
         if path.exists():
-            return FileResponse(path, media_type="application/pdf", filename=f"document-{document_id}.pdf")
+            return FileResponse(
+                path,
+                media_type="application/pdf",
+                filename=f"document-{document_id}.pdf",
+                content_disposition_type="attachment" if download else "inline",
+            )
 
     raise HTTPException(
         status_code=404,

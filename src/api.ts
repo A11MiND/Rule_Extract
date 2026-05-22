@@ -87,6 +87,6 @@ export function getDocumentStats(documentId: number) {
 }
 
 export function exportUrl(documentId: number, kind: string) {
-  if (kind === "source-pdf") return `/api/documents/${documentId}/source-pdf`;
+  if (kind === "source-pdf") return `/api/documents/${documentId}/source-pdf?download=true`;
   return `/api/documents/${documentId}/exports/${kind}`;
 }
