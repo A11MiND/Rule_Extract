@@ -91,9 +91,12 @@ def classify_sections(
                 result, entry = future.result()
                 for item in result.get("sections", []):
                     if isinstance(item, dict) and item.get("id"):
+                        section_id = item["id"]
+                        if not isinstance(section_id, str):
+                            continue
                         classification = str(item.get("classification") or "")
                         confidence = coerce_confidence(item.get("confidence"))
-                        classification_results[item["id"]] = (classification, confidence)
+                        classification_results[section_id] = (classification, confidence)
                 failure_delta = 0
             except Exception as exc:
                 entry = {
@@ -183,8 +186,9 @@ def extract_rules(
 
     max_workers = clamp_concurrency(concurrency)
 
-    # Collect rule dicts for batch insert
-    collected_rules: list[dict[str, Any]] = []
+    # Track saved count and dedup across batches
+    saved_count = 0
+    seen_ids: set[str] = set()
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -216,6 +220,7 @@ def extract_rules(
             document.artifact_manifest = dict(manifest)
             db.commit()
 
+            # Process and save rules from this batch immediately
             rules_in_result = len(result.get("rules", []))
             print(f"Batch {index}: got {rules_in_result} rules from LLM, batch has {len(batch)} sections", flush=True)
             for raw in result.get("rules", []):
@@ -223,10 +228,11 @@ def extract_rules(
                     continue
                 source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
                 section_id = source.get("section_id") or raw.get("section_id")
+                if not isinstance(section_id, str):
+                    section_id = ""
                 section = section_by_id.get(section_id) or batch[0]
                 try:
                     normalized = normalize_rule(raw, document.id, section)
-                    collected_rules.append(normalized)
                 except Exception as exc:
                     print(f"Rule normalize error: {exc}", flush=True)
                     append_llm_window_log(
@@ -243,28 +249,44 @@ def extract_rules(
                     manifest["llm_window_failures"] = manifest.get("llm_window_failures", 0) + 1
                     document.artifact_manifest = dict(manifest)
                     db.commit()
+                    continue
+                try:
+                    validated = RuleBase.model_validate(normalized)
+                    fingerprint = rule_fingerprint(validated.subject, validated.condition, validated.action)
+                    rule_id = f"rule-{document.id}-{fingerprint[:12]}"
+                    if rule_id in seen_ids:
+                        continue
+                    seen_ids.add(rule_id)
+                    saved_count += save_rule_if_new_batch(db, document, normalized, rule_id=rule_id)
+                except Exception as exc:
+                    print(f"SAVE ERROR: {type(exc).__name__}: {exc}", flush=True)
+                    append_llm_window_log(
+                        document.id,
+                        {
+                            "kind": "rule_validation",
+                            "batch_index": index,
+                            "section_ids": [s["id"] for s in batch],
+                            "status": "failed",
+                            "error": str(exc),
+                            "raw_rule": raw,
+                        },
+                    )
+                    manifest["llm_window_failures"] = manifest.get("llm_window_failures", 0) + 1
+                    document.artifact_manifest = dict(manifest)
+                    db.commit()
 
-    # Batch insert all rules with a single commit
-    saved_count = 0
-    for raw in collected_rules:
-        try:
-            count = save_rule_if_new_batch(db, document, raw)
-            saved_count += count
-        except Exception as e:
-            print(f"SAVE ERROR: {type(e).__name__}: {e}", flush=True)
-            import traceback
-            traceback.print_exc()
-            pass
-    print(f"SAVED {saved_count} rules out of {len(collected_rules)} collected", flush=True)
+            # Commit after each batch so rules appear incrementally in the API
+            if saved_count > 0:
+                db.commit()
+
     db.commit()
-    print(f"COMMIT done, checking DB...", flush=True)
+    print(f"SAVED {saved_count} rules total", flush=True)
     db_rules = db.query(models.Rule).filter(models.Rule.document_id == document.id).count()
     print(f"DB has {db_rules} rules for document {document.id}", flush=True)
-    print(f"Final collected_rules count: {len(collected_rules)}, failures: {int(manifest.get('llm_window_failures', 0))}", flush=True)
 
     failures = int(manifest.get("llm_window_failures", 0))
     total = int(manifest.get("llm_windows_total", total_batches))
-    if len(collected_rules) == 0 and failures:
+    if saved_count == 0 and failures:
         document.status = "rule_extraction_failed"
         document.error_message = (
             f"Rule extraction produced no rules. {failures}/{total or failures} LLM windows failed; "
@@ -274,7 +296,7 @@ def extract_rules(
         document.status = "rules_extracted"
         document.error_message = None
     db.commit()
-    return len(collected_rules)
+    return saved_count
 
 
 def extract_rule_window(
@@ -591,11 +613,12 @@ def save_rule_if_new(db: Session, document: models.Document, raw: dict[str, Any]
     return 1
 
 
-def save_rule_if_new_batch(db: Session, document: models.Document, raw: dict[str, Any]) -> int:
+def save_rule_if_new_batch(db: Session, document: models.Document, raw: dict[str, Any], rule_id: str | None = None) -> int:
     """Like save_rule_if_new but does NOT commit - caller manages the transaction."""
     validated = RuleBase.model_validate(raw)
-    fingerprint = rule_fingerprint(validated.subject, validated.condition, validated.action)
-    rule_id = f"rule-{document.id}-{fingerprint[:12]}"
+    if rule_id is None:
+        fingerprint = rule_fingerprint(validated.subject, validated.condition, validated.action)
+        rule_id = f"rule-{document.id}-{fingerprint[:12]}"
     existing = db.query(models.Rule).filter(models.Rule.id == rule_id).first()
     if existing:
         return 0
