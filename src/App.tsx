@@ -1035,28 +1035,34 @@ function RuleMap({
   sections: Section[];
 }) {
   const flatSections = useMemo(() => flattenSections(sections), [sections]);
-  const nodeById = useMemo(() => new Map(graph.nodes.map((node) => [node.id, node])), [graph.nodes]);
-  const sectionById = useMemo(() => flatSections.reduce((map, section) => map.set(section.id, section), new Map<string, Section>()), [flatSections]);
+  const sectionById = useMemo(
+    () => flatSections.reduce((map, s) => map.set(s.id, s), new Map<string, Section>()),
+    [flatSections]
+  );
   const sectionByCode = useMemo(() => {
     const map = new Map<string, Section>();
-    for (const section of flatSections) {
-      const code = sectionCode(section);
-      if (code) map.set(code.toUpperCase(), section);
+    for (const s of flatSections) {
+      const code = sectionCode(s);
+      if (code) map.set(code.toUpperCase(), s);
     }
     return map;
   }, [flatSections]);
-  const rulesBySection = useMemo(() => {
+  const rulesBySectionId = useMemo(() => {
     const map = new Map<string, Rule[]>();
     for (const rule of rules) {
-      const sectionId = rule.section_id || rule.source.section_id || "unknown";
-      map.set(sectionId, [...(map.get(sectionId) ?? []), rule]);
+      const sid = rule.section_id || rule.source.section_id || "unknown";
+      map.set(sid, [...(map.get(sid) ?? []), rule]);
     }
-    return [...map.entries()].sort(([left], [right]) => {
-      const leftSection = sectionById.get(left);
-      const rightSection = sectionById.get(right);
-      return (leftSection?.position ?? Number.MAX_SAFE_INTEGER) - (rightSection?.position ?? Number.MAX_SAFE_INTEGER);
-    });
-  }, [rules, sectionById]);
+    return map;
+  }, [rules]);
+
+  const totalRules = rules.length;
+  const obligationCount = rules.filter((r) => r.type === "obligation").length;
+  const prohibitionCount = rules.filter((r) => r.type === "prohibition").length;
+  const permissionCount = rules.filter((r) => r.type === "permission").length;
+  const procedureCount = rules.filter((r) => r.type === "procedure").length;
+  const deadlineCount = rules.filter((r) => r.type === "deadline").length;
+  const definitionCount = rules.filter((r) => r.type === "definition").length;
 
   return (
     <section className="panel tall-panel">
@@ -1065,71 +1071,228 @@ function RuleMap({
         <h2>Rule Logic Review</h2>
       </div>
       <ExportPanel documentId={documentId} kinds={["rule-graph"]} />
-      {rules.length === 0 ? <p className="muted">Rule logic will appear here after extraction.</p> : null}
-      <div className="logic-map">
-        {rulesBySection.map(([sectionId, sectionRules]) => {
-          const section = sectionById.get(sectionId);
-          return (
-            <article className="section-flow" key={sectionId}>
-              <header>
-                <strong>{section?.title || sectionId}</strong>
-                <span>{sectionRules.length} rules</span>
-              </header>
-              <div className="section-rule-list">
-                {sectionRules.map((rule) => {
-                  const refs = ruleReferences(rule, sectionByCode, section);
-                  return (
-                    <div className="rule-flow" key={rule.id}>
-                      <div className="rule-flow-header">
-                        <strong>{rule.subject || rule.action || rule.id}</strong>
-                        <span>{rule.type}</span>
-                      </div>
-                      {rule.options.length ? (
-                        <div className="logic-branch">
-                          <span>Options</span>
-                          {rule.options.map((option, index) => (
-                            <p key={`${rule.id}-${option.label}-${option.action}-${index}`}>
-                              {option.label || "path"} <ChevronRight size={14} /> {option.action || option.condition || "related path"}
-                            </p>
-                          ))}
-                        </div>
-                      ) : null}
-                      {refs.length ? (
-                        <div className="logic-branch">
-                          <span>References</span>
-                          {refs.map((reference) => (
-                            <p className={reference.resolved ? "" : "unresolved-reference"} key={`${rule.id}-${reference.code}`}>
-                              {reference.code} <ChevronRight size={14} /> {reference.resolved ? reference.title : "unresolved section"}
-                            </p>
-                          ))}
-                        </div>
-                      ) : null}
-                      {rule.dependencies.length || graph.edges.some((edge) => edge.source === rule.id) ? (
-                        <div className="logic-branch">
-                          <span>Rule links</span>
-                          {rule.dependencies.map((dependency, index) => (
-                            <p key={`${rule.id}-${dependency.type}-${dependency.rule_id}-${dependency.reason}-${index}`}>
-                              {dependency.type} <ChevronRight size={14} /> {dependency.rule_id ? nodeById.get(dependency.rule_id)?.label ?? dependency.rule_id : dependency.reason}
-                            </p>
-                          ))}
-                          {graph.edges
-                            .filter((edge) => edge.source === rule.id)
-                            .map((edge, index) => (
-                              <p key={`${edge.source}-${edge.target}-${edge.label}-${index}`}>
-                                {edge.label} <ChevronRight size={14} /> {nodeById.get(edge.target)?.label ?? edge.target}
-                              </p>
-                            ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </div>
-            </article>
-          );
-        })}
-      </div>
+      {totalRules === 0 ? (
+        <p className="muted">Rule logic will appear here after extraction.</p>
+      ) : (
+        <>
+          <div className="mindmap-legend">
+            <span className="legend-item"><span className="legend-dot type-obligation" /> Obligation ({obligationCount})</span>
+            <span className="legend-item"><span className="legend-dot type-prohibition" /> Prohibition ({prohibitionCount})</span>
+            <span className="legend-item"><span className="legend-dot type-permission" /> Permission ({permissionCount})</span>
+            <span className="legend-item"><span className="legend-dot type-deadline" /> Deadline ({deadlineCount})</span>
+            <span className="legend-item"><span className="legend-dot type-procedure" /> Procedure ({procedureCount})</span>
+            <span className="legend-item"><span className="legend-dot type-definition" /> Definition ({definitionCount})</span>
+          </div>
+          <div className="mindmap-tree">
+            {sections.map((section) => (
+              <MindmapSectionNode
+                key={section.id}
+                section={section}
+                sectionById={sectionById}
+                sectionByCode={sectionByCode}
+                rulesBySectionId={rulesBySectionId}
+                graph={graph}
+                depth={0}
+              />
+            ))}
+          </div>
+        </>
+      )}
     </section>
+  );
+}
+
+const RULE_TYPE_COLORS: Record<string, string> = {
+  obligation: "#2563eb",
+  prohibition: "#dc2626",
+  permission: "#16a34a",
+  deadline: "#ea580c",
+  definition: "#7c3aed",
+  procedure: "#6b7280",
+  option: "#ca8a04",
+  checklist: "#0891b2",
+  background: "#9ca3af",
+};
+
+function MindmapSectionNode({
+  section,
+  sectionById,
+  sectionByCode,
+  rulesBySectionId,
+  graph,
+  depth,
+}: {
+  section: Section;
+  sectionById: Map<string, Section>;
+  sectionByCode: Map<string, Section>;
+  rulesBySectionId: Map<string, Rule[]>;
+  graph: RuleGraph;
+  depth: number;
+}) {
+  const [expanded, setExpanded] = useState(depth < 2);
+  const sectionRules = rulesBySectionId.get(section.id) || [];
+  const hasChildren = section.children.length > 0 || sectionRules.length > 0;
+  const indentClass = depth > 0 ? `mm-indent-${Math.min(depth, 4)}` : "";
+
+  return (
+    <div className={`mm-section-node ${indentClass}`}>
+      <div
+        className={`mm-section-header ${hasChildren ? "clickable" : ""} ${sectionRules.length > 0 ? "has-rules" : ""}`}
+        onClick={() => hasChildren && setExpanded(!expanded)}
+        role={hasChildren ? "button" : undefined}
+        tabIndex={hasChildren ? 0 : undefined}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpanded(!expanded); } }}
+      >
+        <span className={`mm-toggle ${expanded ? "open" : ""}`}>
+          {hasChildren ? (expanded ? "▾" : "▸") : " "}
+        </span>
+        <span className="mm-section-code">{sectionCode(section) || `§${section.position}`}</span>
+        <span className="mm-section-title">{section.title}</span>
+        {sectionRules.length > 0 && (
+          <span className="mm-rule-count">{sectionRules.length}</span>
+        )}
+      </div>
+      {expanded && (
+        <div className="mm-section-body">
+          {sectionRules.map((rule) => (
+            <MindmapRuleNode
+              key={rule.id}
+              rule={rule}
+              sectionById={sectionById}
+              sectionByCode={sectionByCode}
+              graph={graph}
+            />
+          ))}
+          {section.children.map((child) => (
+            <MindmapSectionNode
+              key={child.id}
+              section={child}
+              sectionById={sectionById}
+              sectionByCode={sectionByCode}
+              rulesBySectionId={rulesBySectionId}
+              graph={graph}
+              depth={depth + 1}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MindmapRuleNode({
+  rule,
+  sectionById,
+  sectionByCode,
+  graph,
+}: {
+  rule: Rule;
+  sectionById: Map<string, Section>;
+  sectionByCode: Map<string, Section>;
+  graph: RuleGraph;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const typeColor = RULE_TYPE_COLORS[rule.type] || "#6b7280";
+  const refs = useMemo(() => {
+    const section = sectionById.get(rule.section_id || rule.source.section_id || "");
+    return ruleReferences(rule, sectionByCode, section);
+  }, [rule, sectionById, sectionByCode]);
+  const relatedEdges = graph.edges.filter((e) => e.source === rule.id || e.target === rule.id);
+  const hasDetails = rule.condition || rule.action || rule.options.length > 0 || refs.length > 0 || rule.dependencies.length > 0 || relatedEdges.length > 0;
+
+  return (
+    <div className="mm-rule-node">
+      <div
+        className={`mm-rule-header ${hasDetails ? "clickable" : ""}`}
+        onClick={() => hasDetails && setExpanded(!expanded)}
+        role={hasDetails ? "button" : undefined}
+        tabIndex={hasDetails ? 0 : undefined}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpanded(!expanded); } }}
+      >
+        <span className={`mm-toggle small ${expanded ? "open" : ""}`}>
+          {hasDetails ? (expanded ? "▾" : "▸") : "·"}
+        </span>
+        <span className="mm-rule-type" style={{ background: typeColor }}>{rule.type}</span>
+        <span className="mm-rule-subject">{rule.subject || rule.action || rule.id}</span>
+        <span className="mm-confidence">{Math.round(rule.confidence * 100)}%</span>
+      </div>
+      {expanded && (
+        <div className="mm-rule-detail">
+          {rule.condition && (
+            <div className="mm-detail-row">
+              <span className="mm-detail-label">Condition</span>
+              <span className="mm-detail-value">{rule.condition}</span>
+            </div>
+          )}
+          {rule.action && (
+            <div className="mm-detail-row">
+              <span className="mm-detail-label">Action</span>
+              <span className="mm-detail-value">{rule.action}</span>
+            </div>
+          )}
+          {rule.actor && (
+            <div className="mm-detail-row">
+              <span className="mm-detail-label">Actor</span>
+              <span className="mm-detail-value">{rule.actor}</span>
+            </div>
+          )}
+          {rule.deadline && (
+            <div className="mm-detail-row">
+              <span className="mm-detail-label">Deadline</span>
+              <span className="mm-detail-value">{rule.deadline}</span>
+            </div>
+          )}
+          {refs.length > 0 && (
+            <div className="mm-detail-row">
+              <span className="mm-detail-label">Refs</span>
+              <span className="mm-detail-value">
+                {refs.map((r) => (
+                  <span key={r.code} className={`mm-ref ${r.resolved ? "" : "unresolved"}`}>
+                    {r.code} {r.resolved ? `→ ${r.title.slice(0, 60)}` : "(unresolved)"}
+                  </span>
+                ))}
+              </span>
+            </div>
+          )}
+          {rule.options.length > 0 && (
+            <div className="mm-detail-row">
+              <span className="mm-detail-label">Options</span>
+              <div className="mm-options-list">
+                {rule.options.map((opt, i) => (
+                  <div key={i} className="mm-option-item">
+                    <strong>{opt.label || `Path ${i + 1}`}</strong>
+                    {opt.condition && <span className="mm-option-condition">IF: {opt.condition}</span>}
+                    {opt.action && <span className="mm-option-action">THEN: {opt.action}</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {rule.dependencies.length > 0 && (
+            <div className="mm-detail-row">
+              <span className="mm-detail-label">Depends on</span>
+              <span className="mm-detail-value">
+                {rule.dependencies.map((d, i) => (
+                  <span key={i} className="mm-dep">{d.type}: {d.reason || d.rule_id}</span>
+                ))}
+              </span>
+            </div>
+          )}
+          {relatedEdges.length > 0 && (
+            <div className="mm-detail-row">
+              <span className="mm-detail-label">Graph edges</span>
+              <span className="mm-detail-value">
+                {relatedEdges.map((e, i) => (
+                  <span key={i} className="mm-edge">
+                    {e.source === rule.id ? `→ ${e.label}: ${e.target}` : `${e.source} ${e.label} →`}
+                  </span>
+                ))}
+              </span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
