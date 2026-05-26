@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { debounce } from "./utils/debounce";
 import {
   AlertCircle,
   CheckCircle2,
@@ -14,7 +15,10 @@ import {
   Plus,
   Save,
   SearchCheck,
-  Settings
+  Settings,
+  X,
+  Zap,
+  Clock
 } from "lucide-react";
 import {
   createDocument,
@@ -64,7 +68,13 @@ export function App() {
   const [activeView, setActiveView] = useState<View>("import");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [toast, setToast] = useState<{ text: string; type: "success" | "info" } | null>(null);
   const previousStatusRef = useRef<string | null>(null);
+
+  function showToast(text: string, type: "success" | "info" = "success") {
+    setToast({ text, type });
+    setTimeout(() => setToast(null), 3500);
+  }
 
   const loadDocuments = useCallback(async () => {
     const nextDocuments = await getDocuments();
@@ -89,18 +99,41 @@ export function App() {
     if (!documentJob || TERMINAL_STATUSES.has(documentJob.status)) {
       return;
     }
-    const timer = window.setInterval(async () => {
+    let stopped = false;
+    let failureCount = 0;
+    const poll = async () => {
+      const jitter = (Math.random() - 0.5) * 1000;
       const next = await getDocument(documentJob.id).catch((err) => {
+        failureCount++;
         setError(err.message);
         return null;
       });
+      if (stopped) return;
       if (next) {
+        failureCount = 0;
         setDocumentJob(next);
         setDocuments((current) => current.map((document) => (document.id === next.id ? next : document)));
       }
-    }, 2500);
-    return () => window.clearInterval(timer);
-  }, [documentJob]);
+    };
+    const baseInterval = 2500;
+    let currentInterval = baseInterval;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      const jitter = (Math.random() - 0.5) * 1000;
+      timer = window.setTimeout(async () => {
+        await poll();
+        if (!stopped) {
+          currentInterval = Math.min(currentInterval * (failureCount > 0 ? 2 : 1), 30000);
+          schedule();
+        }
+      }, currentInterval + jitter);
+    };
+    schedule();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [documentJob?.id, documentJob?.status]);
 
   useEffect(() => {
     if (!documentJob || !READY_STATUSES.has(documentJob.status)) {
@@ -122,10 +155,31 @@ export function App() {
     if (!documentJob || TERMINAL_STATUSES.has(documentJob.status)) {
       return;
     }
-    const timer = window.setInterval(() => {
-      getDocumentStats(documentJob.id).then(setStats).catch(() => undefined);
-    }, 2000);
-    return () => window.clearInterval(timer);
+    let stopped = false;
+    let failureCount = 0;
+    let currentInterval = 2000;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = () => {
+      getDocumentStats(documentJob.id).then(setStats).catch((err: Error) => {
+        failureCount++;
+        setError((prev) => prev || err.message);
+      });
+    };
+    const schedule = () => {
+      const jitter = (Math.random() - 0.5) * 600;
+      timer = window.setTimeout(() => {
+        poll();
+        if (!stopped) {
+          currentInterval = Math.min(currentInterval * (failureCount > 0 ? 2 : 1), 30000);
+          schedule();
+        }
+      }, currentInterval + jitter);
+    };
+    schedule();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, [documentJob?.id, documentJob?.status]);
 
   useEffect(() => {
@@ -135,19 +189,41 @@ export function App() {
     ) {
       return;
     }
+    let stopped = false;
+    let failureCount = 0;
+    let currentInterval = 2500;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const refreshRuleOutputs = async () => {
-      const [nextRules, nextGraph, nextStats] = await Promise.all([
-        getRules(documentJob.id).catch(() => []),
-        getRuleGraph(documentJob.id).catch(() => ({ nodes: [], edges: [] })),
-        getDocumentStats(documentJob.id).catch(() => null)
-      ]);
-      setRules(nextRules);
-      setGraph(nextGraph);
-      if (nextStats) setStats(nextStats);
+      try {
+        const [nextRules, nextGraph, nextStats] = await Promise.all([
+          getRules(documentJob.id).catch(() => []),
+          getRuleGraph(documentJob.id).catch(() => ({ nodes: [], edges: [] })),
+          getDocumentStats(documentJob.id).catch(() => null)
+        ]);
+        failureCount = 0;
+        setRules(nextRules);
+        setGraph(nextGraph);
+        if (nextStats) setStats(nextStats);
+      } catch {
+        failureCount++;
+      }
     };
-    refreshRuleOutputs();
-    const timer = window.setInterval(refreshRuleOutputs, 2500);
-    return () => window.clearInterval(timer);
+    const schedule = () => {
+      const jitter = (Math.random() - 0.5) * 1000;
+      timer = window.setTimeout(() => {
+        refreshRuleOutputs().then(() => {
+          if (!stopped) {
+            currentInterval = Math.min(currentInterval * (failureCount > 0 ? 2 : 1), 30000);
+            schedule();
+          }
+        });
+      }, currentInterval + jitter);
+    };
+    schedule();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, [documentJob?.id, documentJob?.status]);
 
   async function refreshDocumentData(documentId: number) {
@@ -169,6 +245,7 @@ export function App() {
     try {
       const saved = await saveRuntimeConfig(payload);
       setRuntimeConfig(saved);
+      showToast("API configuration saved", "success");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to save runtime config");
     } finally {
@@ -203,6 +280,7 @@ export function App() {
     setGraph({ nodes: [], edges: [] });
     try {
       await extractRules(documentJob.id);
+      showToast("Rule extraction started — tracking progress below", "info");
       setActiveView("processing");
       const [nextDocument, nextRules, nextGraph] = await Promise.all([
         getDocument(documentJob.id),
@@ -307,12 +385,24 @@ export function App() {
         ))}
       </nav>
 
-      {documentJob ? <TopProgressBar documentJob={documentJob} /> : null}
+      {documentJob ? <TopProgressBar documentJob={documentJob} stats={stats} /> : null}
 
+      {toast ? (
+        <div className={`toast-banner toast-${toast.type}`} role="status">
+          {toast.type === "success" ? <CheckCircle2 size={18} /> : <Zap size={18} />}
+          <span>{toast.text}</span>
+          <button className="toast-dismiss" onClick={() => setToast(null)} type="button" aria-label="Dismiss">
+            <X size={16} />
+          </button>
+        </div>
+      ) : null}
       {error ? (
         <div className="alert" role="alert">
           <AlertCircle size={18} />
           <span>{error}</span>
+          <button className="toast-dismiss" onClick={() => setError("")} type="button" aria-label="Dismiss">
+            <X size={16} />
+          </button>
         </div>
       ) : null}
 
@@ -349,6 +439,7 @@ export function App() {
             errorMessage={documentJob.error_message}
             rules={rules}
             stats={stats}
+            status={documentJob.status}
             onRulesChange={setRules}
           />
         </section>
@@ -431,6 +522,7 @@ function RuntimeConfigPanel({
   busy: boolean;
 }) {
   const [draft, setDraft] = useState<RuntimeConfigUpdate>({});
+  const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     if (!runtimeConfig) return;
@@ -461,6 +553,8 @@ function RuntimeConfigPanel({
         onSubmit={(event) => {
           event.preventDefault();
           onSave({ ...draft, llm_concurrency: concurrency });
+          setSaved(true);
+          setTimeout(() => setSaved(false), 2500);
         }}
       >
         <label>
@@ -500,7 +594,17 @@ function RuntimeConfigPanel({
         </label>
         <label>
           LLM Model
-          <input value={draft.llm_model || ""} onChange={(event) => setDraft({ ...draft, llm_model: event.target.value })} />
+          <input
+            list="llm-model-presets"
+            value={draft.llm_model || ""}
+            onChange={(event) => setDraft({ ...draft, llm_model: event.target.value })}
+            placeholder="Select or type a model name"
+          />
+          <datalist id="llm-model-presets">
+            <option value="doubao-seed-2-0-pro-260215" label="Pro (default)" />
+            <option value="doubao-seed-2-0-flash-260215" label="Flash (fast)" />
+            <option value="doubao-seed-2-0-lite-260215" label="Lite (cheap)" />
+          </datalist>
         </label>
         <label>
           LLM Concurrency: {concurrency}
@@ -512,9 +616,19 @@ function RuntimeConfigPanel({
             onChange={(event) => setDraft({ ...draft, llm_concurrency: Number(event.target.value) })}
           />
         </label>
-        <button className="primary-button" type="submit" disabled={busy}>
-          {busy ? <Loader2 className="spin" size={18} /> : <Save size={18} />}
-          Save API Config
+        <button
+          className={`primary-button${saved ? " saved-feedback" : ""}`}
+          type="submit"
+          disabled={busy}
+        >
+          {busy ? (
+            <Loader2 className="spin" size={18} />
+          ) : saved ? (
+            <CheckCircle2 size={18} />
+          ) : (
+            <Save size={18} />
+          )}
+          {saved ? "Config Saved" : "Save API Config"}
         </button>
       </form>
     </section>
@@ -522,30 +636,58 @@ function RuntimeConfigPanel({
 }
 
 function ProgressPanel({ documentJob, stats }: { documentJob: DocumentJob | null; stats: DocumentStats | null }) {
-  const steps = [
-    "mineru_queued",
-    "mineru_processing",
-    "markdown_ready",
-    "classifying_sections",
-    "extracting_rules",
-    "rules_extracted"
-  ];
-  const currentIndex = documentJob ? steps.indexOf(documentJob.status) : -1;
+  const status = documentJob?.status ?? "";
+  const isClassifying = status === "classifying_sections";
+  const isExtracting = status === "extracting_rules";
+  const isLLMPhase = isClassifying || isExtracting;
+  const isActive = status === "mineru_queued" || status === "mineru_processing" || status === "rule_extraction_queued" || isLLMPhase;
+
+  const windowsCompleted = stats?.llm_windows_completed ?? 0;
+  const windowsTotal = stats?.llm_windows_total ?? 0;
+  const windowsPct = windowsTotal > 0 ? Math.round((windowsCompleted / windowsTotal) * 100) : 0;
 
   return (
     <section className="panel processing-hud">
       <div className="panel-title">
-        <SearchCheck size={20} />
+        {isActive ? <Loader2 className="spin" size={20} /> : <SearchCheck size={20} />}
         <h2>Processing</h2>
+        {isActive ? <span className="live-dot" /> : null}
       </div>
-      <ol className="timeline horizontal">
-        {steps.map((step, index) => (
-          <li key={step} className={index <= currentIndex ? "done" : ""}>
-            {index <= currentIndex ? <CheckCircle2 size={18} /> : <span className="step-dot" />}
-            <span>{labelStatus(step)}</span>
-          </li>
-        ))}
-      </ol>
+
+      {isLLMPhase && windowsTotal > 0 ? (
+        <div className="windows-progress-hero">
+          <div className="windows-progress-label">
+            <span>{isClassifying ? "Classifying sections" : "Extracting rules"}</span>
+            <strong>
+              {windowsCompleted} / {windowsTotal} windows
+            </strong>
+            <span>{windowsPct}%</span>
+          </div>
+          <div className="hud-progress hud-progress-large">
+            <span style={{ width: `${windowsPct}%` }} />
+          </div>
+        </div>
+      ) : null}
+
+      {isLLMPhase && (stats?.rules_extracted ?? 0) > 0 ? (
+        <div className="live-rules-count">
+          <Zap size={16} />
+          <span>{stats?.rules_extracted} rules extracted so far</span>
+        </div>
+      ) : null}
+
+      <div className="processing-phase-badge">
+        <PhaseBadge status={status} />
+      </div>
+
+      {isLLMPhase ? (
+        <div className="mini-timeline">
+          <span className={isClassifying ? "active" : "done"}>Classify</span>
+          <span className="mini-timeline-arrow">&rarr;</span>
+          <span className={isExtracting ? "active" : isClassifying ? "" : "done"}>Extract</span>
+        </div>
+      ) : null}
+
       {documentJob ? (
         <div className="job-meta">
           <span>Document #{documentJob.id}</span>
@@ -554,34 +696,48 @@ function ProgressPanel({ documentJob, stats }: { documentJob: DocumentJob | null
       ) : (
         <p className="muted">No document job yet.</p>
       )}
+
       {documentJob?.error_message ? <p className="error-text">{documentJob.error_message}</p> : null}
-      <StatsGrid stats={stats} />
+      <StatsGrid stats={stats} status={status} />
     </section>
   );
 }
 
-function TopProgressBar({ documentJob }: { documentJob: DocumentJob }) {
-  const steps = [
-    "mineru_queued",
-    "mineru_processing",
-    "markdown_ready",
-    "classifying_sections",
-    "extracting_rules",
-    "rules_extracted"
-  ];
-  const currentIndex = Math.max(0, steps.indexOf(documentJob.status));
-  const progress = documentJob.status.includes("failed")
+function PhaseBadge({ status }: { status: string }) {
+  if (status === "mineru_queued") return <span className="phase-tag phase-queued">Waiting for MinerU to start</span>;
+  if (status === "mineru_processing") return <span className="phase-tag phase-mineru">MinerU is converting PDF to Markdown</span>;
+  if (status === "rule_extraction_queued") return <span className="phase-tag phase-queued">Preparing rule extraction</span>;
+  if (status === "classifying_sections") return <span className="phase-tag phase-classifying">LLM classifying sections</span>;
+  if (status === "extracting_rules") return <span className="phase-tag phase-extracting">LLM extracting rules from candidate sections</span>;
+  if (status === "rules_extracted") return <span className="phase-tag phase-done">Extraction complete</span>;
+  if (status === "markdown_ready") return <span className="phase-tag phase-ready">Markdown ready for review</span>;
+  if (status === "rule_extraction_failed") return <span className="phase-tag phase-failed">Extraction failed</span>;
+  if (status === "mineru_failed") return <span className="phase-tag phase-failed">MinerU conversion failed</span>;
+  return null;
+}
+
+function TopProgressBar({ documentJob, stats }: { documentJob: DocumentJob; stats: DocumentStats | null }) {
+  const steps = ["mineru_queued","mineru_processing","markdown_ready","classifying_sections","extracting_rules","rules_extracted"];
+  const idx = Math.max(0, steps.indexOf(documentJob.status));
+  const pct = documentJob.status.includes("failed")
     ? 100
-    : Math.round(((currentIndex + 1) / steps.length) * 100);
+    : Math.round(((idx + 1) / steps.length) * 100);
+
+  const windowsDone = stats?.llm_windows_completed ?? 0;
+  const windowsTotal = stats?.llm_windows_total ?? 0;
+  const isLLMPhase = documentJob.status === "classifying_sections" || documentJob.status === "extracting_rules";
 
   return (
     <section className="top-progress" aria-label="Document processing progress">
       <div className="top-progress-meta">
         <span>Document #{documentJob.id}</span>
+        {isLLMPhase && windowsTotal > 0 ? (
+          <span className="top-progress-windows">{windowsDone}/{windowsTotal} windows</span>
+        ) : null}
         <span>{labelStatus(documentJob.status)}</span>
       </div>
       <div className={`top-progress-bar ${documentJob.status.includes("failed") ? "failed" : ""}`}>
-        <span style={{ width: `${progress}%` }} />
+        <span style={{ width: `${pct}%` }} />
       </div>
     </section>
   );
@@ -638,17 +794,20 @@ function SectionPreview({
 
   useEffect(() => setDraft(section.content || section.title), [section.content, section.title]);
 
-  async function handleSave(nextContent: string) {
-    const normalized = nextContent.trim();
-    if (normalized === section.content.trim()) return;
-    setSaving(true);
-    try {
-      const saved = await saveSection(documentId, section.id, normalized);
-      onSaved(saved);
-    } finally {
-      setSaving(false);
-    }
-  }
+  const debouncedSave = useCallback(
+    debounce(async (nextContent: string) => {
+      const normalized = nextContent.trim();
+      if (normalized === section.content.trim()) return;
+      setSaving(true);
+      try {
+        const saved = await saveSection(documentId, section.id, normalized);
+        onSaved(saved);
+      } finally {
+        setSaving(false);
+      }
+    }, 300),
+    [documentId, section.id, section.content, onSaved]
+  );
 
   if (paragraphLike) {
     return (
@@ -658,7 +817,7 @@ function SectionPreview({
           value={draft}
           saving={saving}
           onChange={setDraft}
-          onSave={handleSave}
+          onSave={debouncedSave}
           className="doc-clause"
         />
         {section.children.map((child) => (
@@ -681,7 +840,7 @@ function SectionPreview({
           value={draft}
           saving={saving}
           onChange={setDraft}
-          onSave={handleSave}
+          onSave={debouncedSave}
           className="doc-body"
         />
       ) : null}
@@ -727,13 +886,13 @@ function EditableParagraph({
       <div
         className={className}
         contentEditable
-        suppressContentEditableWarning
         role="textbox"
         spellCheck={false}
         onFocus={() => setEditing(true)}
         onBlur={(event) => {
           setEditing(false);
           const next = event.currentTarget.innerText;
+          if (next.trim() === value.trim()) return;
           onChange(next);
           void onSave(next);
         }}
@@ -752,12 +911,14 @@ function RulesPanel({
   errorMessage,
   rules,
   stats,
+  status,
   onRulesChange
 }: {
   documentId: number;
   errorMessage?: string | null;
   rules: Rule[];
   stats: DocumentStats | null;
+  status?: string;
   onRulesChange: (rules: Rule[]) => void;
 }) {
   const [filter, setFilter] = useState("all");
@@ -776,7 +937,7 @@ function RulesPanel({
         <h2>Rule Cards</h2>
       </div>
       {errorMessage ? <p className="error-text">Partial extraction failed: {errorMessage}</p> : null}
-      <StatsGrid stats={stats} />
+      <StatsGrid stats={stats} status={status} />
       <div className="filter-row">
         {["all", "obligation", "option", "reference", "low", "reviewed"].map((item) => (
           <button className={filter === item ? "active" : ""} key={item} onClick={() => setFilter(item)} type="button">
@@ -801,15 +962,18 @@ function RuleCard({ rule, onSaved }: { rule: Rule; onSaved: (rule: Rule) => void
 
   useEffect(() => setDraft(rule), [rule]);
 
-  async function handleSave() {
-    setSaving(true);
-    try {
-      const saved = await saveRule(draft);
-      onSaved(saved);
-    } finally {
-      setSaving(false);
-    }
-  }
+  const debouncedSave = useCallback(
+    debounce(async () => {
+      setSaving(true);
+      try {
+        const saved = await saveRule(draft);
+        onSaved(saved);
+      } finally {
+        setSaving(false);
+      }
+    }, 300),
+    [draft, onSaved]
+  );
 
   return (
     <article className="rule-card">
@@ -850,7 +1014,7 @@ function RuleCard({ rule, onSaved }: { rule: Rule; onSaved: (rule: Rule) => void
           <option value="reviewed">Reviewed</option>
           <option value="rejected">Rejected</option>
         </select>
-        <button onClick={handleSave} disabled={saving}>
+        <button onClick={debouncedSave} disabled={saving}>
           {saving ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
           Save rule
         </button>
@@ -973,21 +1137,9 @@ function StatusBadge({ status }: { status: string }) {
   return <span className={`status-badge status-${status}`}>{labelStatus(status)}</span>;
 }
 
-function StatsGrid({ stats }: { stats: DocumentStats | null }) {
-  const items = [
-    ["Sections", stats?.total_sections ?? 0],
-    ["Classified", stats?.classified_sections ?? 0],
-    ["Candidates", stats?.candidate_sections ?? 0],
-    ["Windows", `${stats?.llm_windows_completed ?? 0}/${stats?.llm_windows_total ?? 0}`],
-    ["Rules", stats?.rules_extracted ?? 0],
-    ["Options", stats?.option_rules ?? 0],
-    ["Links", stats?.dependency_links ?? 0],
-    ["Low confidence", stats?.low_confidence_rules ?? 0],
-    ["Reviewed", stats?.reviewed_rules ?? 0],
-    ["Draft", stats?.draft_rules ?? 0],
-    ["Rejected", stats?.rejected_rules ?? 0],
-    ["Failures", stats?.partial_failures ?? 0]
-  ];
+function StatsGrid({ stats, status }: { stats: DocumentStats | null; status?: string }) {
+  const items = visibleStats(stats, status);
+  if (!items.length) return null;
   return (
     <div className="stats-grid">
       {items.map(([label, value]) => (
@@ -998,6 +1150,47 @@ function StatsGrid({ stats }: { stats: DocumentStats | null }) {
       ))}
     </div>
   );
+}
+
+function visibleStats(stats: DocumentStats | null, status?: string): [string, string | number][] {
+  if (!stats) return [];
+  if (status === "mineru_queued" || status === "mineru_processing") return [];
+  if (status === "mineru_failed" || status === "rule_extraction_failed" || status === "rule_extraction_queued") return [];
+  if (status === "markdown_ready") return [["Sections", stats.total_sections]];
+  if (status === "classifying_sections") {
+    return [
+      ["Sections", stats.total_sections],
+      ["Classified", stats.classified_sections],
+      ["Candidates", stats.candidate_sections],
+      ["Windows", `${stats.llm_windows_completed}/${stats.llm_windows_total}`]
+    ];
+  }
+  if (status === "extracting_rules") {
+    const result: [string, string | number][] = [
+      ["Windows", `${stats.llm_windows_completed}/${stats.llm_windows_total}`],
+      ["Rules", stats.rules_extracted],
+      ["Candidates", stats.candidate_sections]
+    ];
+    if (stats.option_rules > 0) result.push(["Options", stats.option_rules]);
+    if (stats.dependency_links > 0) result.push(["Links", stats.dependency_links]);
+    if (stats.partial_failures > 0) result.push(["Failures", stats.partial_failures]);
+    return result;
+  }
+  const all: [string, string | number][] = [
+    ["Sections", stats.total_sections],
+    ["Classified", stats.classified_sections],
+    ["Candidates", stats.candidate_sections],
+    ["Windows", `${stats.llm_windows_completed}/${stats.llm_windows_total}`],
+    ["Rules", stats.rules_extracted],
+    ["Options", stats.option_rules],
+    ["Links", stats.dependency_links]
+  ];
+  if (stats.low_confidence_rules > 0) all.push(["Low confidence", stats.low_confidence_rules]);
+  all.push(["Reviewed", stats.reviewed_rules]);
+  all.push(["Draft", stats.draft_rules]);
+  if (stats.rejected_rules > 0) all.push(["Rejected", stats.rejected_rules]);
+  if (stats.partial_failures > 0) all.push(["Failures", stats.partial_failures]);
+  return all;
 }
 
 function ExportPanel({ documentId, kinds }: { documentId: number; kinds: string[] }) {

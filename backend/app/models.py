@@ -4,14 +4,13 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
 from .database import Base
 
 
-JsonType = JSON().with_variant(JSONB, "postgresql")
+JsonType = JSON
 
 
 class Document(Base):
@@ -42,7 +41,7 @@ class Document(Base):
 class Section(Base):
     __tablename__ = "sections"
 
-    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
     position: Mapped[int] = mapped_column(Integer, nullable=False)
     level: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -58,7 +57,7 @@ class Section(Base):
 class Rule(Base):
     __tablename__ = "rules"
 
-    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
     document_id: Mapped[int] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
     section_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     source: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)

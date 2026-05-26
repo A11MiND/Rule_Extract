@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Any
 
 import requests
@@ -30,19 +31,30 @@ class LLMClient:
         if not self.api_key:
             raise LLMError("LLM API key is required for real rule extraction.")
         payload = self.build_chat_payload(system_prompt, user_prompt)
-        response = requests.post(
-            f"{self.api_base}/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=120,
-        )
-        response.raise_for_status()
-        data = response.json()
-        content = data["choices"][0]["message"]["content"]
-        return parse_json_content(content)
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = requests.post(
+                    f"{self.api_base}/chat/completions",
+                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                    json=payload,
+                    timeout=120,
+                )
+                response.raise_for_status()
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                return parse_json_content(content)
+            except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
+                last_exc = exc
+                if attempt < 2:
+                    time.sleep((2 ** attempt) * 1.0)
+            except (json.JSONDecodeError, LLMError):
+                raise
+        msg = f"LLM request failed after 3 attempts: {last_exc}"
+        raise LLMError(msg) from last_exc
 
     def build_chat_payload(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
-        return {
+        payload = {
             "model": self.model,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -50,8 +62,8 @@ class LLMClient:
             ],
             "temperature": 0,
             "max_tokens": 4096,
-            "response_format": {"type": "json_object"},
         }
+        return payload
 
 
 DoubaoClient = LLMClient

@@ -60,54 +60,90 @@ def classify_sections(
     concurrency: int = 8,
 ) -> None:
     sections = list(document.sections)
-    batches = chunked(sections, CLASSIFICATION_BATCH_SIZE)
-    set_window_totals(db, document, total=len(batches))
+    section_dicts = [
+        {"id": s.id, "heading_path": s.heading_path, "content": s.content}
+        for s in sections
+    ]
+    batches = chunked(section_dicts, CLASSIFICATION_BATCH_SIZE)
+    total_batches = len(batches)
+
+    # Prepare manifest update (will be committed once at the end)
+    manifest = dict(document.artifact_manifest or {})
+    manifest["llm_windows_total"] = total_batches
+    manifest["llm_windows_completed"] = 0
+    manifest["llm_window_failures"] = 0
+    manifest["llm_windows_path"] = str(llm_windows_path(document.id))
+    document.artifact_manifest = manifest
+
     max_workers = clamp_concurrency(concurrency)
+
+    # Collect results keyed by section_id for batch update
+    classification_results: dict[str, tuple[str, float]] = {}  # section_id -> (classification, confidence)
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(classify_section_window, llm, batch, batch_index): (batch_index, batch)
+            executor.submit(classify_section_window, llm, batch, batch_index): batch_index
             for batch_index, batch in enumerate(batches, start=1)
         }
         for future in as_completed(futures):
-            batch_index, batch = futures[future]
+            batch_index = futures[future]
             try:
                 result, entry = future.result()
-                by_id = {
-                    item.get("id"): item
-                    for item in result.get("sections", [])
-                    if isinstance(item, dict)
-                }
+                for item in result.get("sections", []):
+                    if isinstance(item, dict) and item.get("id"):
+                        classification = str(item.get("classification") or "")
+                        confidence = coerce_confidence(item.get("confidence"))
+                        classification_results[item["id"]] = (classification, confidence)
                 failure_delta = 0
             except Exception as exc:
                 entry = {
                     "kind": "classification",
                     "batch_index": batch_index,
-                    "section_ids": [section.id for section in batch],
-                    "prompt": build_classification_prompt(batch),
+                    "section_ids": [s["id"] for s in batches[batch_index - 1]],
+                    "prompt": build_classification_prompt_from_dicts(batches[batch_index - 1]),
                     "status": "failed",
                     "error": str(exc),
                 }
-                by_id = {}
                 failure_delta = 1
-            for section in batch:
-                item = by_id.get(section.id) or {}
-                classification = str(item.get("classification") or "")
-                if classification not in {
-                    "background",
-                    "definition",
-                    "rule_candidate",
-                    "option_logic",
-                    "mixed",
-                    "table_only",
-                }:
+                # Apply heuristic fallback for all sections in failed batch
+                for section in batches[batch_index - 1]:
                     classification, confidence = classify_section_heuristic(section)
-                else:
-                    confidence = coerce_confidence(item.get("confidence"))
-                section.classification = classification
-                section.classification_confidence = confidence
+                    classification_results[section["id"]] = (classification, confidence)
             append_llm_window_log(document.id, entry)
-            update_window_progress(db, document, completed_delta=1, failure_delta=failure_delta)
+
+            # Update manifest and commit so API polls can show live progress
+            manifest["llm_windows_completed"] = manifest.get("llm_windows_completed", 0) + 1
+            manifest["llm_window_failures"] = manifest.get("llm_window_failures", 0) + failure_delta
+            document.artifact_manifest = dict(manifest)
+            db.commit()
+
+    # Batch update all sections in one commit
+    section_ids = list(classification_results.keys())
+    db_sections = {s.id: s for s in db.query(models.Section).filter(models.Section.id.in_(section_ids)).all()}
+    for section_id, (classification, confidence) in classification_results.items():
+        section = db_sections.get(section_id)
+        if not section:
+            continue
+        if classification not in {
+            "background", "definition", "rule_candidate", "option_logic", "mixed", "table_only"
+        }:
+            classification, confidence = classify_section_heuristic_by_id(
+                section_id, classification_results, db_sections
+            )
+        section.classification = classification
+        section.classification_confidence = confidence
     db.commit()
+
+
+def classify_section_heuristic_by_id(
+    section_id: str,
+    classification_results: dict[str, tuple[str, float]],
+    db_sections: dict[str, models.Section],
+) -> tuple[str, float]:
+    section = db_sections.get(section_id)
+    if section:
+        return classify_section_heuristic(section)
+    return "mixed", 0.55
 
 
 def extract_rules(
@@ -124,68 +160,111 @@ def extract_rules(
 
     db.query(models.Rule).filter(models.Rule.document_id == document.id).delete()
     db.commit()
-    saved = 0
+
     candidate_sections = [
-        section
-        for section in document.sections
-        if section.classification not in {"background", "table_only"} and section.content.strip()
+        {"id": s.id, "document_id": s.document_id, "heading_path": s.heading_path, "content": s.content, "classification": s.classification}
+        for s in document.sections
+        if s.classification not in {"background", "table_only"} and s.content.strip()
     ]
     batches = chunked(candidate_sections, EXTRACTION_BATCH_SIZE)
-    set_window_totals(db, document, total=len(batches))
+    total_batches = len(batches)
+
+    manifest = dict(document.artifact_manifest or {})
+    manifest["llm_windows_total"] = total_batches
+    manifest["llm_windows_completed"] = 0
+    manifest["llm_window_failures"] = 0
+    manifest["llm_windows_path"] = str(llm_windows_path(document.id))
+    document.artifact_manifest = manifest
+
     if not batches:
         document.status = "rules_extracted"
         db.commit()
         return 0
 
     max_workers = clamp_concurrency(concurrency)
+
+    # Collect rule dicts for batch insert
+    collected_rules: list[dict[str, Any]] = []
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(extract_rule_window, llm, batch, definitions, index): (index, batch)
+            executor.submit(extract_rule_window, llm, batch, definitions, index): index
             for index, batch in enumerate(batches, start=1)
         }
         for future in as_completed(futures):
-            index, batch = futures[future]
-            section_by_id = {section.id: section for section in batch}
+            index = futures[future]
+            batch = batches[index - 1]
+            section_by_id = {s["id"]: s for s in batch}
             try:
                 result, entry = future.result()
             except Exception as exc:
                 entry = {
                     "kind": "extraction",
                     "batch_index": index,
-                    "section_ids": [section.id for section in batch],
+                    "section_ids": [s["id"] for s in batch],
                     "status": "failed",
                     "error": str(exc),
                 }
                 append_llm_window_log(document.id, entry)
-                update_window_progress(db, document, completed_delta=1, failure_delta=1)
+                manifest["llm_windows_completed"] = manifest.get("llm_windows_completed", 0) + 1
+                manifest["llm_window_failures"] = manifest.get("llm_window_failures", 0) + 1
+                document.artifact_manifest = dict(manifest)
+                db.commit()
                 continue
             append_llm_window_log(document.id, entry)
-            update_window_progress(db, document, completed_delta=1)
-            for raw in result.get("rules", []):
-                if isinstance(raw, dict):
-                    source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
-                    section_id = source.get("section_id") or raw.get("section_id")
-                    section = section_by_id.get(section_id) or batch[0]
-                    try:
-                        saved += save_rule_if_new(db, document, normalize_rule(raw, document.id, section))
-                    except Exception as exc:
-                        append_llm_window_log(
-                            document.id,
-                            {
-                                "kind": "rule_validation",
-                                "batch_index": index,
-                                "section_ids": [section.id for section in batch],
-                                "status": "failed",
-                                "error": str(exc),
-                                "raw_rule": raw,
-                            },
-                        )
-                        update_window_progress(db, document, failure_delta=1)
+            manifest["llm_windows_completed"] = manifest.get("llm_windows_completed", 0) + 1
+            document.artifact_manifest = dict(manifest)
+            db.commit()
 
-    manifest = dict(document.artifact_manifest or {})
-    failures = int(manifest.get("llm_window_failures") or 0)
-    total = int(manifest.get("llm_windows_total") or len(batches))
-    if saved == 0 and failures:
+            rules_in_result = len(result.get("rules", []))
+            print(f"Batch {index}: got {rules_in_result} rules from LLM, batch has {len(batch)} sections", flush=True)
+            for raw in result.get("rules", []):
+                if not isinstance(raw, dict):
+                    continue
+                source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
+                section_id = source.get("section_id") or raw.get("section_id")
+                section = section_by_id.get(section_id) or batch[0]
+                try:
+                    normalized = normalize_rule(raw, document.id, section)
+                    collected_rules.append(normalized)
+                except Exception as exc:
+                    print(f"Rule normalize error: {exc}", flush=True)
+                    append_llm_window_log(
+                        document.id,
+                        {
+                            "kind": "rule_validation",
+                            "batch_index": index,
+                            "section_ids": [s["id"] for s in batch],
+                            "status": "failed",
+                            "error": str(exc),
+                            "raw_rule": raw,
+                        },
+                    )
+                    manifest["llm_window_failures"] = manifest.get("llm_window_failures", 0) + 1
+                    document.artifact_manifest = dict(manifest)
+                    db.commit()
+
+    # Batch insert all rules with a single commit
+    saved_count = 0
+    for raw in collected_rules:
+        try:
+            count = save_rule_if_new_batch(db, document, raw)
+            saved_count += count
+        except Exception as e:
+            print(f"SAVE ERROR: {type(e).__name__}: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+            pass
+    print(f"SAVED {saved_count} rules out of {len(collected_rules)} collected", flush=True)
+    db.commit()
+    print(f"COMMIT done, checking DB...", flush=True)
+    db_rules = db.query(models.Rule).filter(models.Rule.document_id == document.id).count()
+    print(f"DB has {db_rules} rules for document {document.id}", flush=True)
+    print(f"Final collected_rules count: {len(collected_rules)}, failures: {int(manifest.get('llm_window_failures', 0))}", flush=True)
+
+    failures = int(manifest.get("llm_window_failures", 0))
+    total = int(manifest.get("llm_windows_total", total_batches))
+    if len(collected_rules) == 0 and failures:
         document.status = "rule_extraction_failed"
         document.error_message = (
             f"Rule extraction produced no rules. {failures}/{total or failures} LLM windows failed; "
@@ -195,21 +274,22 @@ def extract_rules(
         document.status = "rules_extracted"
         document.error_message = None
     db.commit()
-    return saved
+    return len(collected_rules)
 
 
 def extract_rule_window(
     llm: LLMClient,
-    batch: list[models.Section],
+    batch: list[dict[str, Any]],
     definitions: str,
     batch_index: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    prompt = build_extraction_prompt(batch, definitions)
+    """Workers receive dicts (primitives) not ORM objects."""
+    prompt = build_extraction_prompt_from_dicts(batch, definitions)
     result = llm.complete_json(EXTRACT_SYSTEM_PROMPT, prompt)
     entry = {
         "kind": "extraction",
         "batch_index": batch_index,
-        "section_ids": [section.id for section in batch],
+        "section_ids": [s["id"] for s in batch],
         "prompt": prompt,
         "response": result,
         "status": "completed",
@@ -219,15 +299,16 @@ def extract_rule_window(
 
 def classify_section_window(
     llm: LLMClient,
-    batch: list[models.Section],
+    batch: list[dict[str, Any]],
     batch_index: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    prompt = build_classification_prompt(batch)
+    """Workers receive dicts (primitives) not ORM objects."""
+    prompt = build_classification_prompt_from_dicts(batch)
     result = llm.complete_json(CLASSIFY_SYSTEM_PROMPT, prompt)
     entry = {
         "kind": "classification",
         "batch_index": batch_index,
-        "section_ids": [section.id for section in batch],
+        "section_ids": [s["id"] for s in batch],
         "prompt": prompt,
         "response": result,
         "status": "completed",
@@ -247,6 +328,22 @@ def build_classification_prompt(sections: list[models.Section]) -> str:
                 f"TEXT:\n{section.content[:900]}"
             )
             for section in sections
+        )
+    )
+
+
+def build_classification_prompt_from_dicts(sections: list[dict[str, Any]]) -> str:
+    return (
+        "Classify the following sections for rule extraction. Return JSON only: "
+        '{"sections":[{"id":"...","classification":"rule_candidate","confidence":0.8,"reason":"..."}]}.\n\n'
+        + "\n\n".join(
+            (
+                f"SECTION_ID: {s['id']}\n"
+                f"HEADING_PATH: {' > '.join(s.get('heading_path', []))}\n"
+                f"DETECTED_REFERENCES: {', '.join(detect_references(s.get('content', ''))) or '(none)'}\n"
+                f"TEXT:\n{s.get('content', '')[:900]}"
+            )
+            for s in sections
         )
     )
 
@@ -276,6 +373,31 @@ def build_extraction_prompt(sections: list[models.Section], definitions: str) ->
     )
 
 
+def build_extraction_prompt_from_dicts(sections: list[dict[str, Any]], definitions: str) -> str:
+    return (
+        f"Document ID: {sections[0].get('document_id', 0)}\n"
+        f"Global definitions and abbreviations:\n{definitions[:4000] or '(none provided)'}\n\n"
+        "Sections:\n"
+        + "\n\n".join(
+            (
+                f"SECTION_ID: {s['id']}\n"
+                f"HEADING_PATH: {' > '.join(s.get('heading_path', []))}\n"
+                f"DETECTED_REFERENCES: {', '.join(detect_references(s.get('content', ''))) or '(none)'}\n"
+                f"TEXT:\n{s.get('content', '')[:MAX_PROMPT_CHARS_PER_SECTION]}"
+            )
+            for s in sections
+        )
+        + "\n\nReturn JSON only: {\"rules\": [...]}."
+        " Extract at most 3 evidence-backed rules per section batch."
+        " For every rule, source must be an object with heading_path, section_id, evidence_text,"
+        " page_range, and coordinates."
+        " type must be one of: obligation, prohibition, permission, definition, procedure,"
+        " deadline, option, checklist, background."
+        " review_status must be draft."
+        " For option branches, populate options and next_rule_ids only when the text supports them."
+    )
+
+
 def append_llm_window_log(document_id: int, entry: dict[str, Any]) -> None:
     path = llm_windows_path(document_id)
     safe_entry = sanitize_export(entry)
@@ -286,30 +408,6 @@ def append_llm_window_log(document_id: int, entry: dict[str, Any]) -> None:
 
 def llm_windows_path(document_id: int) -> Path:
     return document_storage_dir(document_id) / "llm_windows.jsonl"
-
-
-def update_window_progress(
-    db: Session,
-    document: models.Document,
-    completed_delta: int = 0,
-    failure_delta: int = 0,
-) -> None:
-    manifest = dict(document.artifact_manifest or {})
-    manifest["llm_windows_completed"] = int(manifest.get("llm_windows_completed") or 0) + completed_delta
-    manifest["llm_window_failures"] = int(manifest.get("llm_window_failures") or 0) + failure_delta
-    manifest["llm_windows_path"] = str(llm_windows_path(document.id))
-    document.artifact_manifest = manifest
-    db.commit()
-
-
-def set_window_totals(db: Session, document: models.Document, total: int) -> None:
-    manifest = dict(document.artifact_manifest or {})
-    manifest["llm_windows_total"] = total
-    manifest["llm_windows_completed"] = 0
-    manifest["llm_window_failures"] = 0
-    manifest["llm_windows_path"] = str(llm_windows_path(document.id))
-    document.artifact_manifest = manifest
-    db.commit()
 
 
 def sanitize_export(value: Any) -> Any:
@@ -332,19 +430,19 @@ def detect_references(text: str) -> list[str]:
     return seen[:20]
 
 
-def normalize_rule(raw: dict[str, Any], document_id: int, section: models.Section) -> dict[str, Any]:
+def normalize_rule(raw: dict[str, Any], document_id: int, section: models.Section | dict[str, Any]) -> dict[str, Any]:
     source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
     if not source and raw.get("source"):
         source = {"evidence_text": str(raw.get("source"))}
     raw["source"] = normalize_source(source, raw, section)
     raw["document_id"] = document_id
-    raw["section_id"] = section.id
+    raw["section_id"] = section.id if hasattr(section, "id") else section.get("id")
     raw["type"] = normalize_rule_type(raw.get("type"))
     raw["review_status"] = normalize_review_status(raw.get("review_status"))
     raw["confidence"] = coerce_confidence(raw.get("confidence"))
-    raw["subject"] = normalize_text(raw.get("subject"), fallback=section.title)
+    raw["subject"] = normalize_text(raw.get("subject"), fallback=getattr(section, "title", "") or section.get("title", ""))
     raw["condition"] = normalize_text(raw.get("condition"))
-    raw["action"] = normalize_text(raw.get("action"), fallback=section.content or section.title)
+    raw["action"] = normalize_text(raw.get("action"), fallback=getattr(section, "content", "") or section.get("content", ""))
     raw["actor"] = normalize_optional_text(raw.get("actor"))
     raw["target"] = normalize_optional_text(raw.get("target"))
     raw["deadline"] = normalize_optional_text(raw.get("deadline"))
@@ -355,19 +453,20 @@ def normalize_rule(raw: dict[str, Any], document_id: int, section: models.Sectio
     return raw
 
 
-def normalize_source(source: dict[str, Any], raw: dict[str, Any], section: models.Section) -> dict[str, Any]:
+def normalize_source(source: dict[str, Any], raw: dict[str, Any], section: models.Section | dict[str, Any]) -> dict[str, Any]:
     heading_path = source.get("heading_path")
     if not isinstance(heading_path, list):
-        heading_path = section.heading_path
+        heading_path = getattr(section, "heading_path", []) or section.get("heading_path", [])
     coordinates = source.get("coordinates")
     if not isinstance(coordinates, list):
         coordinates = []
     evidence_text = source.get("evidence_text")
     if evidence_text is None:
         evidence_text = raw.get("evidence_text") or ""
+    section_id = source.get("section_id") or (section.id if hasattr(section, "id") else section.get("id"))
     return {
         "heading_path": [str(item) for item in heading_path],
-        "section_id": source.get("section_id") or section.id,
+        "section_id": section_id,
         "page_range": normalize_optional_text(source.get("page_range")),
         "evidence_text": str(evidence_text),
         "coordinates": coordinates,
@@ -492,18 +591,54 @@ def save_rule_if_new(db: Session, document: models.Document, raw: dict[str, Any]
     return 1
 
 
+def save_rule_if_new_batch(db: Session, document: models.Document, raw: dict[str, Any]) -> int:
+    """Like save_rule_if_new but does NOT commit - caller manages the transaction."""
+    validated = RuleBase.model_validate(raw)
+    fingerprint = rule_fingerprint(validated.subject, validated.condition, validated.action)
+    rule_id = f"rule-{document.id}-{fingerprint[:12]}"
+    existing = db.query(models.Rule).filter(models.Rule.id == rule_id).first()
+    if existing:
+        return 0
+    db.add(
+        models.Rule(
+            id=rule_id,
+            document_id=document.id,
+            section_id=raw.get("section_id"),
+            source=validated.source.model_dump(),
+            subject=validated.subject,
+            condition=validated.condition,
+            action=validated.action,
+            type=validated.type,
+            actor=validated.actor,
+            target=validated.target,
+            deadline=validated.deadline,
+            options=[option.model_dump() for option in validated.options],
+            dependencies=[dependency.model_dump() for dependency in validated.dependencies],
+            next_rule_ids=validated.next_rule_ids,
+            confidence=validated.confidence,
+            review_status=validated.review_status,
+            notes=validated.notes,
+        )
+    )
+    return 1
+
+
 def rule_fingerprint(subject: str, condition: str, action: str) -> str:
     payload = " ".join([subject.strip().lower(), condition.strip().lower(), action.strip().lower()])
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
-def chunked(items: list[models.Section], size: int) -> list[list[models.Section]]:
+def chunked(items: list, size: int) -> list[list]:
     return [items[index : index + size] for index in range(0, len(items), size)]
 
 
 def classify_section_heuristic(section: models.Section) -> tuple[str, float]:
-    heading = " ".join(section.heading_path).lower()
-    text = section.content.lower()
+    if isinstance(section, dict):
+        heading = " ".join(section.get("heading_path", [])).lower()
+        text = section.get("content", "").lower()
+    else:
+        heading = " ".join(section.heading_path).lower()
+        text = section.content.lower()
     combined = f"{heading}\n{text}"
     if not text.strip() and not re.search(r"\b(option|clause|tender|contract|shall|should)\b", heading):
         return "background", 0.8

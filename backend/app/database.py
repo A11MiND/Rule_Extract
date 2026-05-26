@@ -12,7 +12,14 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+_connect_args: dict = {}
+_kwargs: dict = {}
+if settings.database_url.startswith("sqlite"):
+    _connect_args["check_same_thread"] = False
+else:
+    _kwargs["pool_pre_ping"] = True
+
+engine = create_engine(settings.database_url, connect_args=_connect_args, **_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 

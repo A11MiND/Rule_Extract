@@ -24,7 +24,7 @@ def _int_env(name: str, default: int) -> int:
 class Settings:
     app_env: str = os.getenv("APP_ENV", "development")
     database_url: str = os.getenv(
-        "DATABASE_URL", "postgresql+psycopg2://allmind@127.0.0.1:5432/nec4_poc"
+        "DATABASE_URL", "sqlite:///./storage/nec4_demo.db"
     )
     storage_root: Path = Path(os.getenv("STORAGE_ROOT", "./storage")).resolve()
 

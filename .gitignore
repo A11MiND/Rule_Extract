@@ -13,3 +13,4 @@ backend/nec4_poc.db
 storage/documents/
 storage/uploads/
 storage/raw/
+storage/*.db
