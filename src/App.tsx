@@ -1412,16 +1412,18 @@ function isClauseParagraph(section: Section) {
   return hasLongNumberedLead || hasClauseContent;
 }
 
-function renderInlineReferences(value: string): string {
+function renderInlineReferences(value: string) {
   const parts = value.split(/((?:Section\s+)?(?:[A-Z]\d+|\d+)(?:\.\d+){1,4})/g);
-  return parts
-    .map((part) => {
-      if (/^(?:Section\s+)?(?:[A-Z]\d+|\d+)(?:\.\d+){1,4}$/.test(part)) {
-        return `<mark class="xref">${part}</mark>`;
-      }
-      return part;
-    })
-    .join("");
+  return parts.map((part, index) => {
+    if (/^(?:Section\s+)?(?:[A-Z]\d+|\d+)(?:\.\d+){1,4}$/.test(part)) {
+      return (
+        <mark className="xref" key={`${part}-${index}`}>
+          {part}
+        </mark>
+      );
+    }
+    return part;
+  });
 }
 
 type RichBlock =
@@ -1497,11 +1499,9 @@ function renderTextParagraphs(value: string, keyPrefix: number) {
     .map((part) => part.trim())
     .filter(Boolean)
     .map((part, index) => (
-      <p
-        className="rich-paragraph"
-        key={`text-${keyPrefix}-${index}`}
-        dangerouslySetInnerHTML={{ __html: renderInlineReferences(part) }}
-      />
+      <p className="rich-paragraph" key={`text-${keyPrefix}-${index}`}>
+        {renderInlineReferences(part)}
+      </p>
     ));
 }
 
