@@ -889,7 +889,6 @@ function EditableParagraph({
         role="textbox"
         spellCheck={false}
         suppressContentEditableWarning
-        dangerouslySetInnerHTML={{ __html: renderInlineReferences(value) }}
         onFocus={() => setEditing(true)}
         onBlur={(event) => {
           setEditing(false);
@@ -897,8 +896,9 @@ function EditableParagraph({
           if (next.trim() === value.trim()) return;
           onChange(next);
           void onSave(next);
-        }}
-      />
+        }}>
+        {renderInlineReferences(value)}
+      </div>
       <span className="edit-state" aria-label={saving ? "Saving" : editing ? "Editing" : "Editable"}>
         {saving ? <Loader2 className="spin" size={14} /> : editing ? <Edit3 size={14} /> : <Check size={14} />}
       </span>
