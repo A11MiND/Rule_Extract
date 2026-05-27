@@ -62,6 +62,7 @@ class LLMClient:
             ],
             "temperature": 0,
             "max_tokens": 4096,
+            "response_format": {"type": "json_object"},
         }
         return payload
 
