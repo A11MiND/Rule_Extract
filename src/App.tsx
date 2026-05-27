@@ -888,6 +888,8 @@ function EditableParagraph({
         contentEditable
         role="textbox"
         spellCheck={false}
+        suppressContentEditableWarning
+        dangerouslySetInnerHTML={{ __html: renderInlineReferences(value) }}
         onFocus={() => setEditing(true)}
         onBlur={(event) => {
           setEditing(false);
@@ -896,9 +898,7 @@ function EditableParagraph({
           onChange(next);
           void onSave(next);
         }}
-      >
-        {renderInlineReferences(value)}
-      </div>
+      />
       <span className="edit-state" aria-label={saving ? "Saving" : editing ? "Editing" : "Editable"}>
         {saving ? <Loader2 className="spin" size={14} /> : editing ? <Edit3 size={14} /> : <Check size={14} />}
       </span>
@@ -1392,12 +1392,17 @@ function viewLabel(view: View) {
 }
 
 function exportLabel(kind: string) {
-  if (kind === "source-pdf") return "Source PDF";
-  if (kind === "rule-graph") return "Rule Logic JSON";
-  return kind
-    .split("-")
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
+  const labels: Record<string, string> = {
+    "source-pdf": "Source PDF",
+    "mineru-request": "MinerU Request",
+    "mineru-result": "MinerU Result",
+    "markdown": "Markdown",
+    "rules-json": "Rules JSON",
+    "rules-csv": "Rules CSV",
+    "llm-windows": "LLM Windows",
+    "rule-graph": "Rule Logic JSON",
+  };
+  return labels[kind] ?? kind.split("-").map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(" ");
 }
 
 function isClauseParagraph(section: Section) {
