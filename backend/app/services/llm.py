@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 from typing import Any
@@ -44,12 +45,10 @@ class LLMClient:
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
                 return parse_json_content(content)
-            except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as exc:
+            except Exception as exc:
                 last_exc = exc
                 if attempt < 2:
-                    time.sleep((2 ** attempt) * 1.0)
-            except (json.JSONDecodeError, LLMError):
-                raise
+                    time.sleep((2 ** attempt) * (1.0 + random.random()))
         msg = f"LLM request failed after 3 attempts: {last_exc}"
         raise LLMError(msg) from last_exc
 

@@ -31,7 +31,42 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+# Lazily initialised ChromaDB client / collection for the knowledge-base RAG pipeline.
+_chroma_client = None
+_chroma_collection = None
+
+
+def get_chroma_collection():
+    """Return the (lazily-initialised) ChromaDB collection for KB embeddings."""
+    global _chroma_client, _chroma_collection
+    if _chroma_collection is None:
+        import chromadb
+        _chroma_client = chromadb.PersistentClient(path="./storage/chroma")
+        _chroma_collection = _chroma_client.get_or_create_collection("knowledge_base")
+    return _chroma_collection
+
+
 def init_db() -> None:
     from . import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+
+    # ChromaDB warm-up — ensures the vector store directory exists early
+    try:
+        get_chroma_collection()
+    except Exception:
+        pass
+
+    # Add grouping_level column to existing SQLite databases
+    if settings.database_url.startswith("sqlite"):
+        import sqlite3
+        db_path = settings.database_url.replace("sqlite:///", "")
+        try:
+            conn = sqlite3.connect(db_path)
+            cols = [row[1] for row in conn.execute("PRAGMA table_info(documents)").fetchall()]
+            if "grouping_level" not in cols:
+                conn.execute("ALTER TABLE documents ADD COLUMN grouping_level INTEGER NOT NULL DEFAULT 2")
+                conn.commit()
+            conn.close()
+        except Exception:
+            pass

@@ -1,13 +1,11 @@
 """Verify extraction workers receive only primitives, not ORM objects."""
 from backend.app.services.extraction import (
     chunked,
-    classify_section_heuristic,
     coerce_confidence,
     normalize_rule,
     normalize_rule_type,
     normalize_review_status,
 )
-from unittest.mock import MagicMock
 
 
 def test_chunked_splits_list_into_batches():
@@ -40,15 +38,6 @@ def test_coerce_confidence_clamps_to_0_1():
     assert coerce_confidence(-0.5) == 0.0
     assert coerce_confidence("invalid") == 0.5
     assert coerce_confidence(None) == 0.5
-
-
-def test_classify_section_heuristic_returns_valid_classification():
-    section = MagicMock()
-    section.heading_path = ["Main"]
-    section.content = "The Contractor shall submit the programme."
-    classification, confidence = classify_section_heuristic(section)
-    assert classification in {"background", "definition", "rule_candidate", "option_logic", "mixed", "table_only"}
-    assert 0.0 <= confidence <= 1.0
 
 
 def test_normalize_rule_works_with_dict_instead_of_section():

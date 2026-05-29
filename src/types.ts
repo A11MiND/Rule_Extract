@@ -3,6 +3,7 @@ export interface DocumentJob {
   name: string;
   pdf_url: string;
   contract_family: string;
+  grouping_level: number;
   status: string;
   mineru_task_id?: string | null;
   mineru_state?: string | null;
@@ -21,6 +22,8 @@ export interface RuntimeConfig {
   llm_configured: boolean;
   llm_concurrency: number;
   max_llm_concurrency: number;
+  extraction_prompt: string;
+  default_grouping_level: number;
 }
 
 export interface RuntimeConfigUpdate {
@@ -32,6 +35,8 @@ export interface RuntimeConfigUpdate {
   llm_api_key?: string;
   llm_model?: string;
   llm_concurrency?: number;
+  extraction_prompt?: string;
+  default_grouping_level?: number;
 }
 
 export interface DocumentStats {
@@ -108,4 +113,133 @@ export interface Rule {
 export interface RuleGraph {
   nodes: { id: string; label: string; type: string; confidence: number }[];
   edges: { source: string; target: string; label: string }[];
+}
+
+// ── Phase 0 — Knowledge Base ──────────────────────────────
+
+export interface KnowledgeItem {
+  id: string;
+  source_type: string;
+  source_document: string;
+  source_url?: string | null;
+  title: string;
+  content: string;
+  summary?: string | null;
+  clause_number?: string | null;
+  clause_category?: string | null;
+  parent_document?: string | null;
+  clause_remarks?: string | null;
+  template_name?: string | null;
+  section_number?: string | null;
+  field_definitions?: string | null;
+  circular_number?: string | null;
+  issuing_body?: string | null;
+  effective_date?: string | null;
+  supersedes?: string | null;
+  department?: string | null;
+  chapter?: string | null;
+  section_ref?: string | null;
+  version: string;
+  is_active: boolean;
+  embedding_id?: string | null;
+  metadata_json: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface KBStats {
+  total: number;
+  active: number;
+  inactive: number;
+  by_type: Record<string, number>;
+}
+
+// ── Phase 1 — Mappings ───────────────────────────────────
+
+export interface Mapping {
+  id: string;
+  knowledge_item_id: string;
+  knowledge_item_title: string;
+  rule_id?: string | null;
+  rule_subject?: string | null;
+  template_section_id?: string | null;
+  template_section_title: string;
+  mapping_type: string;
+  confidence: number;
+  rationale: string;
+  human_confirmed: boolean;
+  human_decision?: string | null;
+  created_at: string;
+}
+
+export interface MappingStats {
+  total: number;
+  confirmed: number;
+  pending: number;
+  rejected: number;
+}
+
+// ── Phase 2 — Vetting ────────────────────────────────────
+
+export interface VettingRun {
+  id: string;
+  title: string;
+  template_id: string;
+  status: string;
+  source_file_path?: string | null;
+  source_file_type?: string | null;
+  total_sections: number;
+  completed_sections: number;
+  total_findings: number;
+  critical_count: number;
+  high_count: number;
+  medium_count: number;
+  low_count: number;
+  error_message?: string | null;
+  created_at: string;
+  completed_at?: string | null;
+}
+
+export interface VettingFinding {
+  id: string;
+  vetting_run_id: string;
+  section_id: string;
+  skill: string;
+  rule_id?: string | null;
+  verdict: string;
+  severity: string;
+  title: string;
+  detail: string;
+  tender_excerpt?: string | null;
+  rule_excerpt?: string | null;
+  human_reviewed: boolean;
+  human_verdict?: string | null;
+  human_comment?: string | null;
+  created_at: string;
+}
+
+// ── Phase 3 — Chat ───────────────────────────────────────
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  messages?: ChatMessage[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  session_id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  citations: Citation[];
+  token_count?: number | null;
+  created_at: string;
+}
+
+export interface Citation {
+  kb_id: string;
+  title: string;
+  excerpt: string;
 }

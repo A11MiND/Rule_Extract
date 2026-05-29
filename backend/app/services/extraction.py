@@ -17,22 +17,99 @@ from .artifacts import document_storage_dir
 from .llm import LLMClient
 
 
-CLASSIFY_SYSTEM_PROMPT = """You classify sections from NEC public works Practice Notes.
-Return JSON only with key sections. sections must be an array.
-Each item must include id, classification, confidence, reason.
-classification must be one of: background, definition, rule_candidate, option_logic, mixed, table_only."""
+DEFAULT_EXTRACT_SYSTEM_PROMPT = """You extract structured rules from NEC public works Practice Notes.
+Return JSON only: {"rules": [...]}. Each rule must include source, subject, condition,
+action, type, actor, target, deadline, options, dependencies, next_rule_ids, confidence,
+review_status, notes. review_status must be "draft".
 
-EXTRACT_SYSTEM_PROMPT = """You extract evidence-backed rules from NEC public works Practice Notes.
-Return JSON only with key rules. rules must be an array.
-Each rule must include source, subject, condition, action, type, actor, target, deadline,
-options, dependencies, next_rule_ids, confidence, review_status, notes.
-Use only the provided text. If text is background, return an empty rules array.
-Use type from obligation, prohibition, permission, definition, procedure, deadline, option,
-checklist, background."""
+─── TYPE CLASSIFICATION (apply in this order) ───
 
-EXTRACTION_BATCH_SIZE = 3
-CLASSIFICATION_BATCH_SIZE = 12
-MAX_PROMPT_CHARS_PER_SECTION = 2200
+1. PROHIBITION — text says something must NOT be done.
+   Keywords: "shall not", "must not", "is prohibited", "is not allowed",
+   "may not", "no person shall", "not be permitted".
+   NEC example: "The Contractor shall not sub-let the whole of the works."
+
+2. PERMISSION — text grants discretion or exemption.
+   Keywords: "may" (when granting choice), "at the discretion of",
+   "is permitted to", "may at its option", "unless otherwise agreed",
+   "the Project Manager may waive".
+   NEC example: "The Contractor may submit a revised programme."
+
+3. DEADLINE — text sets a time limit, due date, or response window.
+   Keywords: "within X weeks/days", "no later than", "by [date]",
+   "the period for reply is", "before the deadline", "time limit",
+   "shall respond within", "within the period of".
+   NEC example: "The Project Manager shall reply within 2 weeks."
+
+4. OPTION — text describes alternative branches or elective contract clauses.
+   Keywords: "Option A/B/C/D/E/F/G", "Option X1/X2/...", "secondary option",
+   "the Employer may choose", "either ... or ...", "alternative",
+   "Options", "choice of", "elects to use".
+   NEC example: "Under Option C, the Contractor's share is calculated..."
+
+5. DEFINITION — text defines a term or concept.
+   Keywords: "means", "is defined as", "refers to", "includes",
+   "the term ... shall mean", "are defined in", "defines".
+   NEC example: ""Defined Cost" means the cost of components in the
+   Schedule of Cost Components."
+
+6. PROCEDURE — text describes a process, workflow, or sequence of steps.
+   Keywords: "first ... then", "steps", "procedure for", "shall be
+   followed", "the process is", "shall be carried out in accordance",
+   sequential actions (first/second/third), "flowchart".
+   NEC example: "The Project Manager assesses the amount due, then
+   certifies payment within 7 days."
+
+7. CHECKLIST — text enumerates items to verify, submit, or complete.
+   Keywords: "checklist", "shall include", "shall contain the following",
+   "the following items", "comprising of", bullet/numbered lists of
+   deliverables, "tender submission shall include", "documents required".
+   NEC example: "The tender submission shall include: (a) Form of Tender,
+   (b) priced Bill of Quantities..."
+
+8. OBLIGATION — text imposes a mandatory duty or requirement.
+   Keywords: "shall", "must", "is required to", "is to", "has a duty to",
+   "the Employer/Contractor/Project Manager shall", "shall ensure",
+   "is responsible for", "will be".
+   NEC example: "The Contractor shall provide the works in accordance
+   with the Scope."
+
+9. BACKGROUND — text that is purely informational, historical, or
+   explanatory with no actionable requirement.
+   Use this for: history sections, introductory context, descriptions of
+   existing practices, summaries of legislation, explanations of "why"
+   rather than "what must be done".
+   NEC example: "In 2000, the Government set up the Construction Industry
+   Review Committee..."
+
+─── WHEN TO SKIP ───
+
+Do NOT extract rules from sections that are:
+- Pure navigation (table of contents, section headers only)
+- Empty or whitespace-only
+- Pure background/history with zero actionable content → use "background"
+
+─── CONFIDENCE ───
+
+Score 0.85-1.0: text explicitly states the rule with clear subject/condition/action.
+Score 0.65-0.85: rule is reasonably inferred but wording is indirect.
+Score 0.45-0.65: significant inference needed; multiple interpretations possible.
+Score <0.45: speculative — consider whether this should be a rule at all.
+
+─── FORMAT ───
+
+- subject: one-line summary of what the rule requires (max 120 chars).
+- condition: when/under what circumstances the rule applies. Use "" if unconditional.
+- action: what must (or must not) be done. Be specific and self-contained.
+- actor: who performs the action (e.g. "Project Manager", "Contractor"). "" if unclear.
+- target: who/what the action applies to. "" if same as actor.
+- deadline: time constraint if any. "" if none.
+- options: [] unless the rule describes alternative branches (Option A/B/C).
+- For option branches, populate options[].{label, condition, action, next_rule_ids}.
+"""
+
+EXTRACTION_BATCH_SIZE = 5
+WINDOW_BATCH_SIZE = 5
 VALID_RULE_TYPES = {
     "obligation",
     "prohibition",
@@ -53,125 +130,44 @@ TYPE_ALIASES = {
 }
 
 
-def classify_sections(
-    db: Session,
-    document: models.Document,
-    llm: LLMClient,
-    concurrency: int = 8,
-) -> None:
-    sections = list(document.sections)
-    section_dicts = [
-        {"id": s.id, "heading_path": s.heading_path, "content": s.content}
-        for s in sections
-    ]
-    batches = chunked(section_dicts, CLASSIFICATION_BATCH_SIZE)
-    total_batches = len(batches)
-
-    # Prepare manifest update (will be committed once at the end)
-    manifest = dict(document.artifact_manifest or {})
-    manifest["llm_windows_total"] = total_batches
-    manifest["llm_windows_completed"] = 0
-    manifest["llm_window_failures"] = 0
-    manifest["llm_windows_path"] = str(llm_windows_path(document.id))
-    document.artifact_manifest = manifest
-
-    max_workers = clamp_concurrency(concurrency)
-
-    # Collect results keyed by section_id for batch update
-    classification_results: dict[str, tuple[str, float]] = {}  # section_id -> (classification, confidence)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(classify_section_window, llm, batch, batch_index): batch_index
-            for batch_index, batch in enumerate(batches, start=1)
-        }
-        for future in as_completed(futures):
-            batch_index = futures[future]
-            try:
-                result, entry = future.result()
-                for item in result.get("sections", []):
-                    if isinstance(item, dict) and item.get("id"):
-                        section_id = item["id"]
-                        if not isinstance(section_id, str):
-                            continue
-                        classification = str(item.get("classification") or "")
-                        confidence = coerce_confidence(item.get("confidence"))
-                        classification_results[section_id] = (classification, confidence)
-                failure_delta = 0
-            except Exception as exc:
-                entry = {
-                    "kind": "classification",
-                    "batch_index": batch_index,
-                    "section_ids": [s["id"] for s in batches[batch_index - 1]],
-                    "prompt": build_classification_prompt_from_dicts(batches[batch_index - 1]),
-                    "status": "failed",
-                    "error": str(exc),
-                }
-                failure_delta = 1
-                # Apply heuristic fallback for all sections in failed batch
-                for section in batches[batch_index - 1]:
-                    classification, confidence = classify_section_heuristic(section)
-                    classification_results[section["id"]] = (classification, confidence)
-            append_llm_window_log(document.id, entry)
-
-            # Update manifest and commit so API polls can show live progress
-            manifest["llm_windows_completed"] = manifest.get("llm_windows_completed", 0) + 1
-            manifest["llm_window_failures"] = manifest.get("llm_window_failures", 0) + failure_delta
-            document.artifact_manifest = dict(manifest)
-            db.commit()
-
-    # Batch update all sections in one commit
-    section_ids = list(classification_results.keys())
-    db_sections = {s.id: s for s in db.query(models.Section).filter(models.Section.id.in_(section_ids)).all()}
-    for section_id, (classification, confidence) in classification_results.items():
-        section = db_sections.get(section_id)
-        if not section:
-            continue
-        if classification not in {
-            "background", "definition", "rule_candidate", "option_logic", "mixed", "table_only"
-        }:
-            classification, confidence = classify_section_heuristic_by_id(
-                section_id, classification_results, db_sections
-            )
-        section.classification = classification
-        section.classification_confidence = confidence
-    db.commit()
-
-
-def classify_section_heuristic_by_id(
-    section_id: str,
-    classification_results: dict[str, tuple[str, float]],
-    db_sections: dict[str, models.Section],
-) -> tuple[str, float]:
-    section = db_sections.get(section_id)
-    if section:
-        return classify_section_heuristic(section)
-    return "mixed", 0.55
-
-
 def extract_rules(
     db: Session,
     document: models.Document,
     llm: LLMClient,
     concurrency: int = 8,
+    system_prompt: str = "",
 ) -> int:
-    definitions = "\n\n".join(
-        f"{' > '.join(section.heading_path)}\n{section.content}"
-        for section in document.sections
-        if section.classification == "definition"
-    )[:10000]
+    """Sliding-window extraction: group by chapter, batch sections within each chapter.
+
+    Chapters provide shared context (heading, cross-refs, definitions). Sections are
+    batched in groups of WINDOW_BATCH_SIZE so the LLM thoroughly processes each section."""
+    grouping_level = int(getattr(document, "grouping_level", 2) or 2)
+
+    sections = list(document.sections)
+    windows = split_document_by_level(sections, grouping_level)
+    if not windows:
+        document.status = "rules_extracted"
+        db.commit()
+        return 0
+
+    cross_ref_map = build_cross_reference_map(sections)
+    all_sections_by_id = {s.id: s for s in sections}
+    definitions = gather_definitions(sections)
 
     db.query(models.Rule).filter(models.Rule.document_id == document.id).delete()
     db.commit()
 
-    candidate_sections = [
-        {"id": s.id, "document_id": s.document_id, "heading_path": s.heading_path, "content": s.content, "classification": s.classification}
-        for s in document.sections
-        if s.classification not in {"background", "table_only"} and s.content.strip()
-    ]
-    batches = chunked(candidate_sections, EXTRACTION_BATCH_SIZE)
-    total_batches = len(batches)
+    # Flatten all (window, batch) pairs into a single job list
+    jobs: list[tuple[int, ExtractionWindow, list[models.Section], str]] = []
+    for window in windows:
+        chapter_context = build_chapter_context(
+            window, definitions, cross_ref_map, all_sections_by_id, document.id,
+        )
+        batches = chunked(window.sections, WINDOW_BATCH_SIZE)
+        for batch in batches:
+            jobs.append((len(jobs) + 1, window, batch, chapter_context))
 
+    total_batches = len(jobs)
     manifest = dict(document.artifact_manifest or {})
     manifest["llm_windows_total"] = total_batches
     manifest["llm_windows_completed"] = 0
@@ -179,33 +175,32 @@ def extract_rules(
     manifest["llm_windows_path"] = str(llm_windows_path(document.id))
     document.artifact_manifest = manifest
 
-    if not batches:
-        document.status = "rules_extracted"
-        db.commit()
-        return 0
-
+    prompt = system_prompt or DEFAULT_EXTRACT_SYSTEM_PROMPT
     max_workers = clamp_concurrency(concurrency)
 
-    # Track saved count and dedup across batches
     saved_count = 0
     seen_ids: set[str] = set()
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
-            executor.submit(extract_rule_window, llm, batch, definitions, index): index
-            for index, batch in enumerate(batches, start=1)
+            executor.submit(
+                extract_rules_from_batch,
+                llm, prompt, window, batch, chapter_context, idx,
+            ): idx
+            for idx, window, batch, chapter_context in jobs
         }
         for future in as_completed(futures):
-            index = futures[future]
-            batch = batches[index - 1]
-            section_by_id = {s["id"]: s for s in batch}
+            idx = futures[future]
+            _, window, batch, _ = jobs[idx - 1]
+            section_by_id = {s.id: s for s in batch}
             try:
                 result, entry = future.result()
             except Exception as exc:
                 entry = {
                     "kind": "extraction",
-                    "batch_index": index,
-                    "section_ids": [s["id"] for s in batch],
+                    "batch_index": idx,
+                    "window_title": window.title,
+                    "section_ids": [s.id for s in batch],
                     "status": "failed",
                     "error": str(exc),
                 }
@@ -215,14 +210,14 @@ def extract_rules(
                 document.artifact_manifest = dict(manifest)
                 db.commit()
                 continue
+
             append_llm_window_log(document.id, entry)
             manifest["llm_windows_completed"] = manifest.get("llm_windows_completed", 0) + 1
-            document.artifact_manifest = dict(manifest)
-            db.commit()
 
-            # Process and save rules from this batch immediately
             rules_in_result = len(result.get("rules", []))
-            print(f"Batch {index}: got {rules_in_result} rules from LLM, batch has {len(batch)} sections", flush=True)
+            if rules_in_result:
+                print(f"Batch {idx} ({window.title}): got {rules_in_result} rules from {len(batch)} sections", flush=True)
+
             for raw in result.get("rules", []):
                 if not isinstance(raw, dict):
                     continue
@@ -239,8 +234,8 @@ def extract_rules(
                         document.id,
                         {
                             "kind": "rule_validation",
-                            "batch_index": index,
-                            "section_ids": [s["id"] for s in batch],
+                            "batch_index": idx,
+                            "section_ids": [s.id for s in batch],
                             "status": "failed",
                             "error": str(exc),
                             "raw_rule": raw,
@@ -264,8 +259,8 @@ def extract_rules(
                         document.id,
                         {
                             "kind": "rule_validation",
-                            "batch_index": index,
-                            "section_ids": [s["id"] for s in batch],
+                            "batch_index": idx,
+                            "section_ids": [s.id for s in batch],
                             "status": "failed",
                             "error": str(exc),
                             "raw_rule": raw,
@@ -275,7 +270,7 @@ def extract_rules(
                     document.artifact_manifest = dict(manifest)
                     db.commit()
 
-            # Commit after each batch so rules appear incrementally in the API
+            document.artifact_manifest = dict(manifest)
             if saved_count > 0:
                 db.commit()
 
@@ -299,125 +294,199 @@ def extract_rules(
     return saved_count
 
 
-def extract_rule_window(
-    llm: LLMClient,
-    batch: list[dict[str, Any]],
+class ExtractionWindow:
+    """A group of sections forming one LLM extraction call."""
+    __slots__ = ("title", "sections")
+
+    def __init__(self, title: str, sections: list[models.Section]) -> None:
+        self.title = title
+        self.sections = sections
+
+
+def split_document_by_level(sections: list[models.Section], level: int) -> list[ExtractionWindow]:
+    """Group sections into windows at the given heading level.
+
+    A heading at the target level starts a new window; all deeper sections
+    belong to that window. Sections before the first target-level heading
+    go into a preamble window."""
+    if not sections:
+        return []
+    windows: list[ExtractionWindow] = []
+    current_sections: list[models.Section] = []
+    current_title = "Preamble"
+    for s in sections:
+        if s.level == level:
+            if current_sections:
+                windows.append(ExtractionWindow(current_title, current_sections))
+            current_sections = [s]
+            current_title = s.title
+        else:
+            current_sections.append(s)
+    if current_sections:
+        windows.append(ExtractionWindow(current_title, current_sections))
+    return windows
+
+
+def gather_definitions(sections: list[models.Section]) -> str:
+    """Collect definition-like sections into a global definitions string.
+
+    Uses lightweight heuristics: sections whose heading or first 200 chars
+    contain definition keywords."""
+    definition_keywords = re.compile(
+        r"\b(definition|terminolog|abbreviation|meaning of|interpretation|glossary)\b",
+        re.IGNORECASE,
+    )
+    parts: list[str] = []
+    total_chars = 0
+    for s in sections:
+        heading = " ".join(s.heading_path)
+        snippet = s.content[:200] if s.content else ""
+        if definition_keywords.search(heading) or definition_keywords.search(snippet):
+            text = f"{' > '.join(s.heading_path)}\n{s.content}"
+            parts.append(text)
+            total_chars += len(text)
+            if total_chars > 10000:
+                break
+    return "\n\n".join(parts)
+
+
+def build_cross_reference_map(sections: list[models.Section]) -> dict[str, set[str]]:
+    """Build map of section_id -> set of referenced section_ids.
+
+    Scans section content for patterns like 'Section A6.2', 'Clause 6.2',
+    'see A5.3', then resolves reference text to actual section IDs."""
+    ref_map: dict[str, set[str]] = {}
+    # Build lookup: reference text variants -> section_id
+    id_by_ref: dict[str, str] = {}
+    for s in sections:
+        # Index by the last numeric segment (e.g. "A6.2" from "Part A > A6 Time > A6.2 Foo")
+        for part in s.heading_path:
+            match = re.search(r"([A-Z]?\d+(?:\.\d+)*)$", part)
+            if match:
+                ref_text = match.group(1)
+                if ref_text not in id_by_ref:
+                    id_by_ref[ref_text] = s.id
+        # Also index by title
+        match = re.search(r"([A-Z]?\d+(?:\.\d+)*)", s.title)
+        if match:
+            ref_text = match.group(1)
+            if ref_text not in id_by_ref:
+                id_by_ref[ref_text] = s.id
+
+    for s in sections:
+        refs = detect_references(s.content)
+        resolved: set[str] = set()
+        for ref in refs:
+            target_id = id_by_ref.get(ref)
+            if target_id and target_id != s.id:
+                resolved.add(target_id)
+        if resolved:
+            ref_map[s.id] = resolved
+    return ref_map
+
+
+def get_cross_window_refs(
+    window: ExtractionWindow,
+    window_index_map: dict[str, int],
+    cross_ref_map: dict[str, set[str]],
+) -> set[str]:
+    """Return set of section_ids referenced by this window that live in other windows."""
+    window_ids = {s.id for s in window.sections}
+    refs: set[str] = set()
+    for s in window.sections:
+        for ref_id in cross_ref_map.get(s.id, set()):
+            if ref_id not in window_ids:
+                refs.add(ref_id)
+    return refs
+
+
+def build_chapter_context(
+    window: ExtractionWindow,
     definitions: str,
+    cross_ref_map: dict[str, set[str]],
+    all_sections_by_id: dict[str, models.Section],
+    document_id: int,
+) -> str:
+    """Build shared context for all batches within a chapter window."""
+    heading_path = " > ".join(window.sections[0].heading_path) if window.sections else ""
+    context = (
+        f"Document ID: {document_id}\n"
+        f"Chapter: {window.title}\n"
+        f"Heading Path: {heading_path}\n"
+        f"Global definitions:\n{definitions[:4000] or '(none provided)'}\n"
+    )
+    # Cross-reference context
+    cross_refs = get_cross_window_refs(window, {}, cross_ref_map)
+    if cross_refs:
+        ref_blocks: list[str] = []
+        injected = 0
+        for ref_id in cross_refs:
+            if injected >= 5:
+                break
+            ref_section = all_sections_by_id.get(ref_id)
+            if ref_section:
+                block = (
+                    f"[Section {ref_section.title}]\n"
+                    f"Heading: {' > '.join(ref_section.heading_path)}\n"
+                    f"Content:\n{ref_section.content[:3000]}"
+                )
+                ref_blocks.append(block)
+                injected += 1
+        if ref_blocks:
+            context += (
+                "\n### CROSS-REFERENCE CONTEXT ###\n"
+                "Referenced sections (for context only, do NOT extract rules from these):\n"
+                + "\n---\n".join(ref_blocks)
+                + "\n### END CROSS-REFERENCE CONTEXT ###\n"
+            )
+    return context
+
+
+def build_batch_extraction_prompt(
+    batch: list[models.Section],
+    chapter_context: str,
+) -> str:
+    """Build prompt for a batch of sections within a chapter."""
+    sections_text = "\n\n---\n\n".join(
+        (
+            f"SECTION_ID: {s.id}\n"
+            f"HEADING_PATH: {' > '.join(s.heading_path)}\n"
+            f"TEXT:\n{s.content}"
+        )
+        for s in batch
+    )
+    return (
+        f"{chapter_context}\n"
+        f"Extract ALL rules from EACH of the following {len(batch)} sections. "
+        "Review every section — skip only if truly empty/whitespace.\n\n"
+        f"{sections_text}\n\n"
+        "Return JSON only: {\"rules\": [...]}. "
+        "source must be an object with heading_path, section_id, evidence_text, page_range, coordinates. "
+        "review_status must be \"draft\"."
+    )
+
+
+def extract_rules_from_batch(
+    llm: LLMClient,
+    system_prompt: str,
+    window: ExtractionWindow,
+    batch: list[models.Section],
+    chapter_context: str,
     batch_index: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Workers receive dicts (primitives) not ORM objects."""
-    prompt = build_extraction_prompt_from_dicts(batch, definitions)
-    result = llm.complete_json(EXTRACT_SYSTEM_PROMPT, prompt)
+    """Extract rules from one batch of sections with shared chapter context."""
+    prompt = build_batch_extraction_prompt(batch, chapter_context)
+    result = llm.complete_json(system_prompt, prompt)
     entry = {
         "kind": "extraction",
         "batch_index": batch_index,
-        "section_ids": [s["id"] for s in batch],
+        "window_title": window.title,
+        "section_ids": [s.id for s in batch],
         "prompt": prompt,
         "response": result,
         "status": "completed",
     }
     return result, entry
-
-
-def classify_section_window(
-    llm: LLMClient,
-    batch: list[dict[str, Any]],
-    batch_index: int,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Workers receive dicts (primitives) not ORM objects."""
-    prompt = build_classification_prompt_from_dicts(batch)
-    result = llm.complete_json(CLASSIFY_SYSTEM_PROMPT, prompt)
-    entry = {
-        "kind": "classification",
-        "batch_index": batch_index,
-        "section_ids": [s["id"] for s in batch],
-        "prompt": prompt,
-        "response": result,
-        "status": "completed",
-    }
-    return result, entry
-
-
-def build_classification_prompt(sections: list[models.Section]) -> str:
-    return (
-        "Classify the following sections for rule extraction. Return JSON only: "
-        '{"sections":[{"id":"...","classification":"rule_candidate","confidence":0.8,"reason":"..."}]}.\n\n'
-        + "\n\n".join(
-            (
-                f"SECTION_ID: {section.id}\n"
-                f"HEADING_PATH: {' > '.join(section.heading_path)}\n"
-                f"DETECTED_REFERENCES: {', '.join(detect_references(section.content)) or '(none)'}\n"
-                f"TEXT:\n{section.content[:900]}"
-            )
-            for section in sections
-        )
-    )
-
-
-def build_classification_prompt_from_dicts(sections: list[dict[str, Any]]) -> str:
-    return (
-        "Classify the following sections for rule extraction. Return JSON only: "
-        '{"sections":[{"id":"...","classification":"rule_candidate","confidence":0.8,"reason":"..."}]}.\n\n'
-        + "\n\n".join(
-            (
-                f"SECTION_ID: {s['id']}\n"
-                f"HEADING_PATH: {' > '.join(s.get('heading_path', []))}\n"
-                f"DETECTED_REFERENCES: {', '.join(detect_references(s.get('content', ''))) or '(none)'}\n"
-                f"TEXT:\n{s.get('content', '')[:900]}"
-            )
-            for s in sections
-        )
-    )
-
-
-def build_extraction_prompt(sections: list[models.Section], definitions: str) -> str:
-    return (
-        f"Document ID: {sections[0].document_id}\n"
-        f"Global definitions and abbreviations:\n{definitions[:4000] or '(none provided)'}\n\n"
-        "Sections:\n"
-        + "\n\n".join(
-            (
-                f"SECTION_ID: {section.id}\n"
-                f"HEADING_PATH: {' > '.join(section.heading_path)}\n"
-                f"DETECTED_REFERENCES: {', '.join(detect_references(section.content)) or '(none)'}\n"
-                f"TEXT:\n{section.content[:MAX_PROMPT_CHARS_PER_SECTION]}"
-            )
-            for section in sections
-        )
-        + "\n\nReturn JSON only: {\"rules\": [...]}."
-        " Extract at most 3 evidence-backed rules per section batch."
-        " For every rule, source must be an object with heading_path, section_id, evidence_text,"
-        " page_range, and coordinates."
-        " type must be one of: obligation, prohibition, permission, definition, procedure,"
-        " deadline, option, checklist, background."
-        " review_status must be draft."
-        " For option branches, populate options and next_rule_ids only when the text supports them."
-    )
-
-
-def build_extraction_prompt_from_dicts(sections: list[dict[str, Any]], definitions: str) -> str:
-    return (
-        f"Document ID: {sections[0].get('document_id', 0)}\n"
-        f"Global definitions and abbreviations:\n{definitions[:4000] or '(none provided)'}\n\n"
-        "Sections:\n"
-        + "\n\n".join(
-            (
-                f"SECTION_ID: {s['id']}\n"
-                f"HEADING_PATH: {' > '.join(s.get('heading_path', []))}\n"
-                f"DETECTED_REFERENCES: {', '.join(detect_references(s.get('content', ''))) or '(none)'}\n"
-                f"TEXT:\n{s.get('content', '')[:MAX_PROMPT_CHARS_PER_SECTION]}"
-            )
-            for s in sections
-        )
-        + "\n\nReturn JSON only: {\"rules\": [...]}."
-        " Extract at most 3 evidence-backed rules per section batch."
-        " For every rule, source must be an object with heading_path, section_id, evidence_text,"
-        " page_range, and coordinates."
-        " type must be one of: obligation, prohibition, permission, definition, procedure,"
-        " deadline, option, checklist, background."
-        " review_status must be draft."
-        " For option branches, populate options and next_rule_ids only when the text supports them."
-    )
 
 
 def append_llm_window_log(document_id: int, entry: dict[str, Any]) -> None:
@@ -452,19 +521,30 @@ def detect_references(text: str) -> list[str]:
     return seen[:20]
 
 
+def _section_attr(section: models.Section | dict[str, Any], key: str, default: Any = "") -> Any:
+    """Read *key* from a SQLAlchemy model or dict, falling back to *default* when missing or falsy."""
+    if hasattr(section, key):
+        val = getattr(section, key)
+    elif isinstance(section, dict):
+        val = section.get(key, default)
+    else:
+        return default
+    return val if val else default
+
+
 def normalize_rule(raw: dict[str, Any], document_id: int, section: models.Section | dict[str, Any]) -> dict[str, Any]:
     source = raw.get("source") if isinstance(raw.get("source"), dict) else {}
     if not source and raw.get("source"):
         source = {"evidence_text": str(raw.get("source"))}
     raw["source"] = normalize_source(source, raw, section)
     raw["document_id"] = document_id
-    raw["section_id"] = section.id if hasattr(section, "id") else section.get("id")
+    raw["section_id"] = _section_attr(section, "id", "")
     raw["type"] = normalize_rule_type(raw.get("type"))
     raw["review_status"] = normalize_review_status(raw.get("review_status"))
     raw["confidence"] = coerce_confidence(raw.get("confidence"))
-    raw["subject"] = normalize_text(raw.get("subject"), fallback=getattr(section, "title", "") or section.get("title", ""))
+    raw["subject"] = normalize_text(raw.get("subject"), fallback=_section_attr(section, "title"))
     raw["condition"] = normalize_text(raw.get("condition"))
-    raw["action"] = normalize_text(raw.get("action"), fallback=getattr(section, "content", "") or section.get("content", ""))
+    raw["action"] = normalize_text(raw.get("action"), fallback=_section_attr(section, "content"))
     raw["actor"] = normalize_optional_text(raw.get("actor"))
     raw["target"] = normalize_optional_text(raw.get("target"))
     raw["deadline"] = normalize_optional_text(raw.get("deadline"))
@@ -478,14 +558,14 @@ def normalize_rule(raw: dict[str, Any], document_id: int, section: models.Sectio
 def normalize_source(source: dict[str, Any], raw: dict[str, Any], section: models.Section | dict[str, Any]) -> dict[str, Any]:
     heading_path = source.get("heading_path")
     if not isinstance(heading_path, list):
-        heading_path = getattr(section, "heading_path", []) or section.get("heading_path", [])
+        heading_path = _section_attr(section, "heading_path", [])
     coordinates = source.get("coordinates")
     if not isinstance(coordinates, list):
         coordinates = []
     evidence_text = source.get("evidence_text")
     if evidence_text is None:
         evidence_text = raw.get("evidence_text") or ""
-    section_id = source.get("section_id") or (section.id if hasattr(section, "id") else section.get("id"))
+    section_id = source.get("section_id") or _section_attr(section, "id", "")
     return {
         "heading_path": [str(item) for item in heading_path],
         "section_id": section_id,
@@ -653,26 +733,3 @@ def rule_fingerprint(subject: str, condition: str, action: str) -> str:
 
 def chunked(items: list, size: int) -> list[list]:
     return [items[index : index + size] for index in range(0, len(items), size)]
-
-
-def classify_section_heuristic(section: models.Section) -> tuple[str, float]:
-    if isinstance(section, dict):
-        heading = " ".join(section.get("heading_path", [])).lower()
-        text = section.get("content", "").lower()
-    else:
-        heading = " ".join(section.heading_path).lower()
-        text = section.content.lower()
-    combined = f"{heading}\n{text}"
-    if not text.strip() and not re.search(r"\b(option|clause|tender|contract|shall|should)\b", heading):
-        return "background", 0.8
-    if re.search(r"\b(definition|terminolog|abbreviation|meaning of|interpretation)\b", combined):
-        return "definition", 0.72
-    if re.search(r"\b(background|history|executive summary|contents|general information)\b", heading):
-        return "background", 0.7
-    if re.search(
-        r"\b(shall|should|must|required|requirement|submit|review|check|approve|include|"
-        r"determine|assess|option|clause|procedure|tender document|project office)\b",
-        combined,
-    ):
-        return "rule_candidate", 0.68
-    return "mixed", 0.55

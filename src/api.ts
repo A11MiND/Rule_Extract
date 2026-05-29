@@ -1,6 +1,8 @@
 import type {
   DocumentJob,
   DocumentStats,
+  KBStats,
+  KnowledgeItem,
   Rule,
   RuleGraph,
   RuntimeConfig,
@@ -23,6 +25,7 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
 export function createDocument(payload: {
   name: string;
   pdf_url: string;
+  grouping_level?: number;
 }) {
   return request<DocumentJob>("/api/documents", {
     method: "POST",
@@ -89,4 +92,46 @@ export function getDocumentStats(documentId: number) {
 export function exportUrl(documentId: number, kind: string) {
   if (kind === "source-pdf") return `/api/documents/${documentId}/source-pdf?download=true`;
   return `/api/documents/${documentId}/exports/${kind}`;
+}
+
+// ── Knowledge Base (Phase 0) ─────────────────────────────
+
+export function getKnowledgeItems(params?: {
+  source_type?: string;
+  parent_document?: string;
+  template_name?: string;
+  is_active?: boolean;
+  search?: string;
+  offset?: number;
+  limit?: number;
+}) {
+  const qs = new URLSearchParams();
+  if (params) {
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null) qs.set(k, String(v));
+    });
+  }
+  const query = qs.toString();
+  return request<KnowledgeItem[]>(`/api/knowledge${query ? `?${query}` : ""}`);
+}
+
+export function getKnowledgeStats() {
+  return request<KBStats>("/api/knowledge/stats");
+}
+
+export function getKnowledgeItem(id: string) {
+  return request<KnowledgeItem>(`/api/knowledge/${id}`);
+}
+
+export function updateKnowledgeItem(id: string, data: Partial<KnowledgeItem>) {
+  return request<KnowledgeItem>(`/api/knowledge/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(data)
+  });
+}
+
+export function triggerIngestion() {
+  return request<{ status: string; task_id?: string }>("/api/knowledge/ingest", {
+    method: "POST"
+  });
 }

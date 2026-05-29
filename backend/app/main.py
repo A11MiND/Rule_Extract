@@ -16,10 +16,11 @@ from . import models, schemas
 from .config import settings
 from .database import SessionLocal, get_db, init_db
 from .services.artifacts import download_source_pdf, extract_zip, write_zip
-from .services.extraction import classify_sections, extract_rules
+from .services.extraction import extract_rules
 from .services.llm import LLMClient, LLMError
 from .services.markdown import build_section_tree, parse_markdown_sections, parse_mineru_content_sections
 from .services.mineru import MinerUClient, MinerUError
+from .routers import knowledge, mappings, vetting
 from .runtime_config import (
     effective_llm_key,
     effective_mineru_token,
@@ -31,6 +32,10 @@ from .runtime_config import (
 
 app = FastAPI(title="NEC Rule Extraction Demo")
 app.mount("/storage", StaticFiles(directory=settings.storage_root), name="storage")
+
+app.include_router(knowledge.router)
+app.include_router(mappings.router)
+app.include_router(vetting.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -74,6 +79,7 @@ def create_document(
         name=payload.name,
         pdf_url=str(payload.pdf_url),
         contract_family=payload.contract_family,
+        grouping_level=payload.grouping_level,
         status="mineru_queued",
     )
     db.add(document)
@@ -437,7 +443,7 @@ def run_rule_extraction_pipeline(document_id: int) -> None:
     db = SessionLocal()
     try:
         document = require_document(db, document_id)
-        document.status = "classifying_sections"
+        document.status = "extracting_rules"
         document.error_message = None
         db.commit()
 
@@ -451,10 +457,11 @@ def run_rule_extraction_pipeline(document_id: int) -> None:
             model=config.llm_model,
             provider=config.llm_provider,
         )
-        classify_sections(db, document, llm, concurrency=config.llm_concurrency)
-        document.status = "extracting_rules"
-        db.commit()
-        extract_rules(db, document, llm, concurrency=config.llm_concurrency)
+        extract_rules(
+            db, document, llm,
+            concurrency=config.llm_concurrency,
+            system_prompt=config.extraction_prompt,
+        )
     except (LLMError, Exception) as exc:
         document = db.query(models.Document).filter(models.Document.id == document_id).first()
         if document:
@@ -552,14 +559,11 @@ def compute_document_stats(document: models.Document) -> schemas.DocumentStats:
         dependency_links += sum(len(option.get("referenced_sections", [])) for option in rule.options or [])
         if rule.type == "option" or rule.options:
             option_rules += 1
+    sections_with_content = sum(1 for s in sections if s.content.strip())
     return schemas.DocumentStats(
         total_sections=len(sections),
-        classified_sections=sum(1 for section in sections if section.classification),
-        candidate_sections=sum(
-            1
-            for section in sections
-            if section.classification not in {None, "background", "table_only"} and section.content.strip()
-        ),
+        classified_sections=sections_with_content,
+        candidate_sections=sections_with_content,
         llm_windows_completed=int(manifest.get("llm_windows_completed") or 0),
         llm_windows_total=int(manifest.get("llm_windows_total") or 0),
         rules_extracted=len(rules),

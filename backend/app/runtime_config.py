@@ -20,6 +20,8 @@ class RuntimeConfig:
     llm_api_key: str = ""
     llm_model: str = settings.llm_model
     llm_concurrency: int = DEFAULT_LLM_CONCURRENCY
+    extraction_prompt: str = ""
+    default_grouping_level: int = 2
 
 
 _runtime_config = RuntimeConfig()
@@ -55,6 +57,8 @@ def public_runtime_config(config: RuntimeConfig | None = None) -> dict:
         "llm_configured": bool(config.llm_api_key or settings.llm_api_key),
         "llm_concurrency": clamp_concurrency(config.llm_concurrency),
         "max_llm_concurrency": MAX_LLM_CONCURRENCY,
+        "extraction_prompt": config.extraction_prompt,
+        "default_grouping_level": config.default_grouping_level,
     }
 
 

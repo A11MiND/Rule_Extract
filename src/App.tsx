@@ -17,8 +17,10 @@ import {
   SearchCheck,
   Settings,
   X,
+  XCircle,
   Zap,
-  Clock
+  Clock,
+  Library
 } from "lucide-react";
 import {
   createDocument,
@@ -35,6 +37,7 @@ import {
   saveRuntimeConfig,
   saveSection
 } from "./api";
+import { KBWorkspace } from "./components/KBWorkspace";
 import type {
   DocumentJob,
   DocumentStats,
@@ -48,13 +51,12 @@ import type {
 const READY_STATUSES = new Set([
   "markdown_ready",
   "rule_extraction_queued",
-  "classifying_sections",
   "extracting_rules",
   "rules_extracted",
   "rule_extraction_failed"
 ]);
 const TERMINAL_STATUSES = new Set(["mineru_failed", "rule_extraction_failed", "rules_extracted"]);
-const VIEWS = ["import", "processing", "review", "rules", "map"] as const;
+const VIEWS = ["import", "processing", "review", "map", "kb"] as const;
 type View = (typeof VIEWS)[number];
 
 export function App() {
@@ -185,7 +187,7 @@ export function App() {
   useEffect(() => {
     if (
       !documentJob ||
-      !["rule_extraction_queued", "classifying_sections", "extracting_rules"].includes(documentJob.status)
+      !["rule_extraction_queued", "extracting_rules"].includes(documentJob.status)
     ) {
       return;
     }
@@ -253,7 +255,7 @@ export function App() {
     }
   }
 
-  async function handleCreate(payload: { name: string; pdf_url: string }) {
+  async function handleCreate(payload: { name: string; pdf_url: string; grouping_level?: number }) {
     setBusy(true);
     setError("");
     try {
@@ -410,6 +412,7 @@ export function App() {
         <section className="portal-page import-page">
           <RuntimeConfigPanel runtimeConfig={runtimeConfig} onSave={handleSaveRuntimeConfig} busy={busy} />
           <ImportPanel onCreate={handleCreate} busy={busy} runtimeConfig={runtimeConfig} />
+          <ExtractionSettingsPanel runtimeConfig={runtimeConfig} onSave={handleSaveRuntimeConfig} busy={busy} />
         </section>
       ) : null}
 
@@ -432,22 +435,15 @@ export function App() {
         </section>
       ) : null}
 
-      {activeView === "rules" && documentJob && READY_STATUSES.has(documentJob.status) ? (
+      {activeView === "map" && documentJob && READY_STATUSES.has(documentJob.status) ? (
         <section className="portal-page">
-          <RulesPanel
-            documentId={documentJob.id}
-            errorMessage={documentJob.error_message}
-            rules={rules}
-            stats={stats}
-            status={documentJob.status}
-            onRulesChange={setRules}
-          />
+          <RuleMap documentId={documentJob.id} graph={graph} rules={rules} sections={sections} onRulesChange={setRules} />
         </section>
       ) : null}
 
-      {activeView === "map" && documentJob && READY_STATUSES.has(documentJob.status) ? (
+      {activeView === "kb" ? (
         <section className="portal-page">
-          <RuleMap documentId={documentJob.id} graph={graph} rules={rules} sections={sections} />
+          <KBWorkspace />
         </section>
       ) : null}
 
@@ -468,12 +464,13 @@ function ImportPanel({
   busy,
   runtimeConfig
 }: {
-  onCreate: (payload: { name: string; pdf_url: string }) => void;
+  onCreate: (payload: { name: string; pdf_url: string; grouping_level?: number }) => void;
   busy: boolean;
   runtimeConfig: RuntimeConfig | null;
 }) {
   const [name, setName] = useState("NEC Practice Note Demo");
   const [pdfUrl, setPdfUrl] = useState("");
+  const [groupingLevel, setGroupingLevel] = useState(runtimeConfig?.default_grouping_level ?? 2);
 
   return (
     <section className="panel">
@@ -485,7 +482,7 @@ function ImportPanel({
         className="form-stack"
         onSubmit={(event) => {
           event.preventDefault();
-          onCreate({ name, pdf_url: pdfUrl });
+          onCreate({ name, pdf_url: pdfUrl, grouping_level: groupingLevel });
         }}
       >
         <label>
@@ -501,6 +498,15 @@ function ImportPanel({
             required
             type="url"
           />
+        </label>
+        <label>
+          Group by
+          <select value={groupingLevel} onChange={(event) => setGroupingLevel(Number(event.target.value))}>
+            <option value={1}>Part (H1)</option>
+            <option value={2}>Chapter (H2)</option>
+            <option value={3}>Sub-chapter (H3)</option>
+          </select>
+          <span className="hint">Split document at this heading level for rule extraction.</span>
         </label>
         <button className="primary-button" type="submit" disabled={busy}>
           {busy ? <Loader2 className="spin" size={18} /> : <ChevronRight size={18} />}
@@ -635,11 +641,101 @@ function RuntimeConfigPanel({
   );
 }
 
+function ExtractionSettingsPanel({
+  runtimeConfig,
+  onSave,
+  busy
+}: {
+  runtimeConfig: RuntimeConfig | null;
+  onSave: (payload: RuntimeConfigUpdate) => void;
+  busy: boolean;
+}) {
+  const [promptDraft, setPromptDraft] = useState(runtimeConfig?.extraction_prompt ?? "");
+  const [groupingLevel, setGroupingLevel] = useState(runtimeConfig?.default_grouping_level ?? 2);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    if (runtimeConfig) {
+      setPromptDraft(runtimeConfig.extraction_prompt || "");
+      setGroupingLevel(runtimeConfig.default_grouping_level ?? 2);
+    }
+  }, [runtimeConfig]);
+
+  return (
+    <section className="panel">
+      <div className="panel-title">
+        <GitBranch size={20} />
+        <h2>Extraction Settings</h2>
+      </div>
+      <form
+        className="form-stack"
+        onSubmit={(event) => {
+          event.preventDefault();
+          onSave({
+            extraction_prompt: promptDraft,
+            default_grouping_level: groupingLevel
+          });
+          setSaved(true);
+          setTimeout(() => setSaved(false), 2500);
+        }}
+      >
+        <label>
+          Default Grouping Level
+          <select value={groupingLevel} onChange={(event) => setGroupingLevel(Number(event.target.value))}>
+            <option value={1}>Part (H1) — coarser, fewer windows</option>
+            <option value={2}>Chapter (H2) — balanced</option>
+            <option value={3}>Sub-chapter (H3) — finer, more windows</option>
+          </select>
+          <span className="hint">Applies to new documents. Each document keeps its own setting from import time.</span>
+        </label>
+
+        <hr />
+
+        <label>
+          Extraction System Prompt
+          <textarea
+            className="textarea-mono"
+            value={promptDraft}
+            onChange={(event) => setPromptDraft(event.target.value)}
+            placeholder="Enter custom system prompt or leave empty for default..."
+            rows={10}
+            style={{ fontFamily: "monospace", fontSize: "0.82rem" }}
+          />
+          <span className="hint">
+            Available variables: {"{{WINDOW_TITLE}}"}, {"{{HEADING_PATH}}"}, {"{{SECTIONS}}"}, {"{{DEFINITIONS}}"}, {"{{CROSS_REFERENCES}}"}.
+            Leave empty to use the built-in default.
+          </span>
+        </label>
+
+        <div className="flex-row gap-2">
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => {
+              setPromptDraft("");
+              setGroupingLevel(2);
+            }}
+          >
+            Reset to Default
+          </button>
+          <button
+            className={`primary-button${saved ? " saved-feedback" : ""}`}
+            type="submit"
+            disabled={busy}
+          >
+            {saved ? <CheckCircle2 size={18} /> : <Save size={18} />}
+            {saved ? "Saved" : "Save Settings"}
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
 function ProgressPanel({ documentJob, stats }: { documentJob: DocumentJob | null; stats: DocumentStats | null }) {
   const status = documentJob?.status ?? "";
-  const isClassifying = status === "classifying_sections";
   const isExtracting = status === "extracting_rules";
-  const isLLMPhase = isClassifying || isExtracting;
+  const isLLMPhase = isExtracting;
   const isActive = status === "mineru_queued" || status === "mineru_processing" || status === "rule_extraction_queued" || isLLMPhase;
 
   const windowsCompleted = stats?.llm_windows_completed ?? 0;
@@ -657,7 +753,7 @@ function ProgressPanel({ documentJob, stats }: { documentJob: DocumentJob | null
       {isLLMPhase && windowsTotal > 0 ? (
         <div className="windows-progress-hero">
           <div className="windows-progress-label">
-            <span>{isClassifying ? "Classifying sections" : "Extracting rules"}</span>
+            <span>Extracting rules</span>
             <strong>
               {windowsCompleted} / {windowsTotal} windows
             </strong>
@@ -682,9 +778,7 @@ function ProgressPanel({ documentJob, stats }: { documentJob: DocumentJob | null
 
       {isLLMPhase ? (
         <div className="mini-timeline">
-          <span className={isClassifying ? "active" : "done"}>Classify</span>
-          <span className="mini-timeline-arrow">&rarr;</span>
-          <span className={isExtracting ? "active" : isClassifying ? "" : "done"}>Extract</span>
+          <span className={isExtracting ? "active" : "done"}>Extract</span>
         </div>
       ) : null}
 
@@ -707,7 +801,7 @@ function PhaseBadge({ status }: { status: string }) {
   if (status === "mineru_queued") return <span className="phase-tag phase-queued">Waiting for MinerU to start</span>;
   if (status === "mineru_processing") return <span className="phase-tag phase-mineru">MinerU is converting PDF to Markdown</span>;
   if (status === "rule_extraction_queued") return <span className="phase-tag phase-queued">Preparing rule extraction</span>;
-  if (status === "classifying_sections") return <span className="phase-tag phase-classifying">LLM classifying sections</span>;
+
   if (status === "extracting_rules") return <span className="phase-tag phase-extracting">LLM extracting rules from candidate sections</span>;
   if (status === "rules_extracted") return <span className="phase-tag phase-done">Extraction complete</span>;
   if (status === "markdown_ready") return <span className="phase-tag phase-ready">Markdown ready for review</span>;
@@ -717,7 +811,7 @@ function PhaseBadge({ status }: { status: string }) {
 }
 
 function TopProgressBar({ documentJob, stats }: { documentJob: DocumentJob; stats: DocumentStats | null }) {
-  const steps = ["mineru_queued","mineru_processing","markdown_ready","classifying_sections","extracting_rules","rules_extracted"];
+  const steps = ["mineru_queued","mineru_processing","markdown_ready","extracting_rules","rules_extracted"];
   const idx = Math.max(0, steps.indexOf(documentJob.status));
   const pct = documentJob.status.includes("failed")
     ? 100
@@ -725,7 +819,7 @@ function TopProgressBar({ documentJob, stats }: { documentJob: DocumentJob; stat
 
   const windowsDone = stats?.llm_windows_completed ?? 0;
   const windowsTotal = stats?.llm_windows_total ?? 0;
-  const isLLMPhase = documentJob.status === "classifying_sections" || documentJob.status === "extracting_rules";
+  const isLLMPhase = documentJob.status === "extracting_rules";
 
   return (
     <section className="top-progress" aria-label="Document processing progress">
@@ -906,134 +1000,45 @@ function EditableParagraph({
   );
 }
 
-function RulesPanel({
-  documentId,
-  errorMessage,
-  rules,
-  stats,
-  status,
-  onRulesChange
-}: {
-  documentId: number;
-  errorMessage?: string | null;
-  rules: Rule[];
-  stats: DocumentStats | null;
-  status?: string;
-  onRulesChange: (rules: Rule[]) => void;
-}) {
-  const [filter, setFilter] = useState("all");
-  const filteredRules = rules.filter((rule) => {
-    if (filter === "all") return true;
-    if (filter === "low") return rule.confidence < 0.65;
-    if (filter === "reviewed") return rule.review_status === "reviewed";
-    if (filter === "reference") return rule.dependencies.some((dependency) => dependency.type === "references");
-    return rule.type === filter;
-  });
-
-  return (
-    <section className="panel tall-panel">
-      <div className="panel-title">
-        <CheckCircle2 size={20} />
-        <h2>Rule Cards</h2>
-      </div>
-      {errorMessage ? <p className="error-text">Partial extraction failed: {errorMessage}</p> : null}
-      <StatsGrid stats={stats} status={status} />
-      <div className="filter-row">
-        {["all", "obligation", "option", "reference", "low", "reviewed"].map((item) => (
-          <button className={filter === item ? "active" : ""} key={item} onClick={() => setFilter(item)} type="button">
-            {item}
-          </button>
-        ))}
-      </div>
-      <ExportPanel documentId={documentId} kinds={["rules-json", "rules-csv", "llm-windows"]} />
-      <div className="rule-list">
-        {rules.length === 0 ? <p className="muted">Extracted rules will appear here.</p> : null}
-        {filteredRules.map((rule) => (
-          <RuleCard key={rule.id} rule={rule} onSaved={(next) => onRulesChange(rules.map((r) => (r.id === next.id ? next : r)))} />
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function RuleCard({ rule, onSaved }: { rule: Rule; onSaved: (rule: Rule) => void }) {
-  const [draft, setDraft] = useState(rule);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => setDraft(rule), [rule]);
-
-  const debouncedSave = useCallback(
-    debounce(async () => {
-      setSaving(true);
-      try {
-        const saved = await saveRule(draft);
-        onSaved(saved);
-      } finally {
-        setSaving(false);
-      }
-    }, 300),
-    [draft, onSaved]
-  );
-
-  return (
-    <article className="rule-card">
-      <div className="rule-card-header">
-        <span className="rule-type">{draft.type}</span>
-        <span>{Math.round(draft.confidence * 100)}%</span>
-      </div>
-      <label>
-        Subject
-        <input value={draft.subject} onChange={(event) => setDraft({ ...draft, subject: event.target.value })} />
-      </label>
-      <label>
-        Condition
-        <textarea
-          value={draft.condition}
-          onChange={(event) => setDraft({ ...draft, condition: event.target.value })}
-          rows={3}
-        />
-      </label>
-      <label>
-        Action
-        <textarea value={draft.action} onChange={(event) => setDraft({ ...draft, action: event.target.value })} rows={3} />
-      </label>
-      <p className="evidence">{draft.source.evidence_text || "No evidence text supplied."}</p>
-      {draft.options.length ? (
-        <ul className="option-list">
-            {draft.options.map((option, index) => (
-              <li key={`${draft.id}-${option.label}-${index}`}>{option.label}: {option.condition || option.action}</li>
-          ))}
-        </ul>
-      ) : null}
-      <div className="row-actions">
-        <select
-          value={draft.review_status}
-          onChange={(event) => setDraft({ ...draft, review_status: event.target.value as Rule["review_status"] })}
-        >
-          <option value="draft">Draft</option>
-          <option value="reviewed">Reviewed</option>
-          <option value="rejected">Rejected</option>
-        </select>
-        <button onClick={debouncedSave} disabled={saving}>
-          {saving ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
-          Save rule
-        </button>
-      </div>
-    </article>
-  );
-}
-
 function RuleMap({
   documentId,
   graph,
   rules,
-  sections
+  sections,
+  onRulesChange
 }: {
   documentId: number;
   graph: RuleGraph;
   rules: Rule[];
   sections: Section[];
+  onRulesChange: (rules: Rule[]) => void;
 }) {
+  const [filter, setFilter] = useState("all");
+  const [selectedRule, setSelectedRule] = useState<Rule | null>(null);
+  const [ruleDraft, setRuleDraft] = useState<Rule | null>(null);
+  const [savingRuleId, setSavingRuleId] = useState<string | null>(null);
+  const [hoveredXrefCode, setHoveredXrefCode] = useState<string | null>(null);
+  const prevRuleIdsRef = useRef<Set<string>>(new Set());
+  const [newRuleIds, setNewRuleIds] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    const currentIds = new Set(rules.map((r) => r.id));
+    const added = new Set([...currentIds].filter((id) => !prevRuleIdsRef.current.has(id)));
+    if (added.size > 0) {
+      setNewRuleIds((prev) => new Set([...prev, ...added]));
+      const timer = setTimeout(() => {
+        setNewRuleIds((prev) => {
+          const next = new Set(prev);
+          added.forEach((id) => next.delete(id));
+          return next;
+        });
+      }, 2500);
+      prevRuleIdsRef.current = currentIds;
+      return () => clearTimeout(timer);
+    }
+    prevRuleIdsRef.current = currentIds;
+  }, [rules]);
+
   const flatSections = useMemo(() => flattenSections(sections), [sections]);
   const sectionById = useMemo(
     () => flatSections.reduce((map, s) => map.set(s.id, s), new Map<string, Section>()),
@@ -1056,13 +1061,57 @@ function RuleMap({
     return map;
   }, [rules]);
 
-  const totalRules = rules.length;
-  const obligationCount = rules.filter((r) => r.type === "obligation").length;
-  const prohibitionCount = rules.filter((r) => r.type === "prohibition").length;
-  const permissionCount = rules.filter((r) => r.type === "permission").length;
-  const procedureCount = rules.filter((r) => r.type === "procedure").length;
-  const deadlineCount = rules.filter((r) => r.type === "deadline").length;
-  const definitionCount = rules.filter((r) => r.type === "definition").length;
+  const filteredRules = useMemo(() => {
+    return rules.filter((rule) => {
+      if (filter === "all") return true;
+      if (filter === "low") return rule.confidence < 0.65;
+      if (filter === "reviewed") return rule.review_status === "reviewed";
+      if (filter === "reference") return rule.dependencies.some((d) => d.type === "references");
+      return rule.type === filter;
+    });
+  }, [rules, filter]);
+  const filteredRuleIds = useMemo(() => new Set(filteredRules.map((r) => r.id)), [filteredRules]);
+
+  const totalRules = filteredRules.length;
+  const typeCounts: Record<string, number> = {};
+  for (const t of Object.keys(RULE_TYPE_COLORS)) {
+    typeCounts[t] = filteredRules.filter((r) => r.type === t).length;
+  }
+  const allRuleTypes = Object.keys(RULE_TYPE_COLORS);
+
+  async function handleRuleSave() {
+    if (!ruleDraft) return;
+    setSavingRuleId(ruleDraft.id);
+    try {
+      const saved = await saveRule(ruleDraft);
+      onRulesChange(rules.map((r) => (r.id === saved.id ? saved : r)));
+      setSelectedRule(saved);
+      setRuleDraft(saved);
+    } finally {
+      setSavingRuleId(null);
+    }
+  }
+
+  async function handleReviewAction(status: Rule["review_status"]) {
+    if (!ruleDraft) return;
+    const nextDraft = { ...ruleDraft, review_status: status };
+    setRuleDraft(nextDraft);
+    try {
+      const saved = await saveRule(nextDraft);
+      onRulesChange(rules.map((r) => (r.id === saved.id ? saved : r)));
+      setSelectedRule(saved);
+    } catch { /* keep draft state on error */ }
+  }
+
+  function openRuleForEdit(rule: Rule) {
+    setSelectedRule(rule);
+    setRuleDraft({ ...rule });
+  }
+
+  function closeEditPanel() {
+    setSelectedRule(null);
+    setRuleDraft(null);
+  }
 
   return (
     <section className="panel tall-panel">
@@ -1070,33 +1119,237 @@ function RuleMap({
         <GitBranch size={20} />
         <h2>Rule Logic Review</h2>
       </div>
-      <ExportPanel documentId={documentId} kinds={["rule-graph"]} />
-      {totalRules === 0 ? (
+      <div className="filter-row">
+        {(["all", ...allRuleTypes, "low", "reviewed"] as const).map((item) => {
+          const dotColor: Record<string, string> = {
+            all: "#94a3b8", low: "#eab308", reviewed: "#16a34a",
+            ...RULE_TYPE_COLORS,
+          };
+          const tooltips: Record<string, string> = {
+            all: "Show every extracted rule",
+            obligation: "Mandatory duties & requirements",
+            prohibition: "Actions that must NOT be performed",
+            permission: "Actions that are allowed or exempted",
+            deadline: "Time limits or submission deadlines",
+            definition: "Key terms and their definitions",
+            procedure: "Step-by-step processes to follow",
+            option: "Rules with conditional branches (Option A/B/C)",
+            checklist: "Verification or submission checklists",
+            background: "Contextual or background information",
+            low: "Confidence below 65% — needs review",
+            reviewed: "Rules marked as accepted"
+          };
+          const label = item === "all" ? "All" : item.charAt(0).toUpperCase() + item.slice(1);
+          const count = item === "all" ? totalRules : item === "low" ? filteredRules.filter((r) => r.confidence < 0.65).length : item === "reviewed" ? filteredRules.filter((r) => r.review_status === "reviewed").length : (typeCounts[item] || 0);
+          return (
+            <button
+              className={`filter-btn ${filter === item ? "active" : ""}`}
+              key={item}
+              onClick={() => setFilter(item)}
+              type="button"
+            >
+              <span className="filter-dot" style={{ background: dotColor[item] || "#94a3b8" }} />
+              {label} ({count})
+              <span className="filter-tooltip">{tooltips[item]}</span>
+            </button>
+          );
+        })}
+      </div>
+      <ExportPanel documentId={documentId} kinds={["rules-json", "rules-csv", "llm-windows", "rule-graph"]} />
+      {rules.length === 0 ? (
         <p className="muted">Rule logic will appear here after extraction.</p>
       ) : (
-        <>
-          <div className="mindmap-legend">
-            <span className="legend-item"><span className="legend-dot type-obligation" /> Obligation ({obligationCount})</span>
-            <span className="legend-item"><span className="legend-dot type-prohibition" /> Prohibition ({prohibitionCount})</span>
-            <span className="legend-item"><span className="legend-dot type-permission" /> Permission ({permissionCount})</span>
-            <span className="legend-item"><span className="legend-dot type-deadline" /> Deadline ({deadlineCount})</span>
-            <span className="legend-item"><span className="legend-dot type-procedure" /> Procedure ({procedureCount})</span>
-            <span className="legend-item"><span className="legend-dot type-definition" /> Definition ({definitionCount})</span>
+        <div className="mm-workspace">
+          <div className="mm-tree-column">
+            <div className="mindmap-legend">
+              {allRuleTypes.map((t) => (
+                <span className="legend-item" key={t}>
+                  <span className="legend-dot" style={{ background: RULE_TYPE_COLORS[t] }} /> {t.charAt(0).toUpperCase() + t.slice(1)} ({typeCounts[t]})
+                </span>
+              ))}
+            </div>
+            <div className="mindmap-tree">
+              {sections.map((section) => (
+                <MindmapSectionNode
+                  key={section.id}
+                  section={section}
+                  sectionById={sectionById}
+                  sectionByCode={sectionByCode}
+                  rulesBySectionId={rulesBySectionId}
+                  graph={graph}
+                  depth={0}
+                  selectedRuleId={selectedRule?.id ?? null}
+                  newRuleIds={newRuleIds}
+                  filteredRuleIds={filteredRuleIds}
+                  hoveredXrefCode={hoveredXrefCode}
+                  onSelectRule={openRuleForEdit}
+                  onHoverXref={setHoveredXrefCode}
+                />
+              ))}
+            </div>
           </div>
-          <div className="mindmap-tree">
-            {sections.map((section) => (
-              <MindmapSectionNode
-                key={section.id}
-                section={section}
-                sectionById={sectionById}
-                sectionByCode={sectionByCode}
-                rulesBySectionId={rulesBySectionId}
-                graph={graph}
-                depth={0}
-              />
-            ))}
+          <div className="mm-edit-panel">
+            {selectedRule && ruleDraft ? (
+              <>
+                <div className="mm-edit-panel-header">
+                  <div>
+                    <span className="mm-rule-type" style={{ background: RULE_TYPE_COLORS[ruleDraft.type] || "#6b7280", fontSize: 11 }}>{ruleDraft.type}</span>
+                    <span style={{ marginLeft: 8, fontSize: 13, color: "#64748b" }}>
+                      {Math.round(ruleDraft.confidence * 100)}% confidence
+                    </span>
+                  </div>
+                  <button className="toast-dismiss" onClick={closeEditPanel} type="button" aria-label="Close editor">
+                    <X size={18} />
+                  </button>
+                </div>
+
+                {/* Review status banner */}
+                {ruleDraft.review_status === "reviewed" ? (
+                  <div className="review-banner approved">✓ This rule has been accepted</div>
+                ) : ruleDraft.review_status === "rejected" ? (
+                  <div className="review-banner rejected">✗ This rule has been rejected</div>
+                ) : (
+                  <div className="review-banner draft">⚑ This rule needs review</div>
+                )}
+
+                {/* Breadcrumb */}
+                <div className="mm-edit-breadcrumb">
+                  {(ruleDraft.source.heading_path || []).length > 0
+                    ? ruleDraft.source.heading_path.join(" > ")
+                    : "Unknown section"}
+                </div>
+
+                {/* Evidence text */}
+                {ruleDraft.source.evidence_text ? (
+                  <details className="mm-edit-evidence">
+                    <summary>Source evidence</summary>
+                    <p>{ruleDraft.source.evidence_text}</p>
+                  </details>
+                ) : null}
+
+                <div className="form-stack" style={{ marginTop: 12 }}>
+                  <label>
+                    Subject
+                    <input
+                      value={ruleDraft.subject}
+                      onChange={(e) => setRuleDraft({ ...ruleDraft, subject: e.target.value })}
+                    />
+                  </label>
+                  <label>
+                    Condition
+                    <textarea
+                      value={ruleDraft.condition}
+                      onChange={(e) => setRuleDraft({ ...ruleDraft, condition: e.target.value })}
+                      rows={3}
+                    />
+                  </label>
+                  <label>
+                    Action
+                    <textarea
+                      value={ruleDraft.action}
+                      onChange={(e) => setRuleDraft({ ...ruleDraft, action: e.target.value })}
+                      rows={3}
+                    />
+                  </label>
+
+                  {/* Options as links */}
+                  {ruleDraft.options.length > 0 ? (
+                    <div className="mm-edit-section">
+                      <span className="mm-detail-label">Options</span>
+                      <div className="mm-edit-options">
+                        {ruleDraft.options.map((opt, i) => {
+                          const refSections = (opt.referenced_sections || [])
+                            .map((code) => sectionByCode.get(code.toUpperCase()))
+                            .filter(Boolean) as Section[];
+                          return (
+                            <div key={i} className="mm-edit-option-item">
+                              <strong>{opt.label || `Path ${i + 1}`}</strong>
+                              {opt.condition ? <span className="mm-option-condition">IF: {opt.condition}</span> : null}
+                              {opt.action ? <span className="mm-option-action">THEN: {opt.action}</span> : null}
+                              {refSections.length > 0 ? (
+                                <span className="mm-option-refs">
+                                  {refSections.map((sec) => (
+                                    <span key={sec.id} className="mm-ref resolved" style={{ margin: 2 }}>
+                                      {sectionCode(sec)} → {sec.title.slice(0, 50)}
+                                    </span>
+                                  ))}
+                                </span>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {/* Dependencies */}
+                  {ruleDraft.dependencies.length > 0 ? (
+                    <div className="mm-edit-section">
+                      <span className="mm-detail-label">Depends on</span>
+                      <span className="mm-detail-value">
+                        {ruleDraft.dependencies.map((d, i) => (
+                          <span key={i} className="mm-dep">{d.type}: {d.reason || d.rule_id}</span>
+                        ))}
+                      </span>
+                    </div>
+                  ) : null}
+                </div>
+
+                {/* Review action buttons */}
+                <div className="mm-edit-actions">
+                  <span className="mm-detail-label" style={{ display: "block", marginBottom: 6 }}>Review status</span>
+                  <div className="review-actions">
+                    <button
+                      type="button"
+                      className={`review-action-btn approve${ruleDraft.review_status === "reviewed" ? " active" : ""}`}
+                      onClick={() => handleReviewAction("reviewed")}
+                    >
+                      <CheckCircle2 size={16} />
+                      Accept
+                    </button>
+                    <button
+                      type="button"
+                      className={`review-action-btn needs-work${ruleDraft.review_status === "draft" ? " active" : ""}`}
+                      onClick={() => handleReviewAction("draft")}
+                    >
+                      <Edit3 size={16} />
+                      Needs Work
+                    </button>
+                    <button
+                      type="button"
+                      className={`review-action-btn reject${ruleDraft.review_status === "rejected" ? " active" : ""}`}
+                      onClick={() => handleReviewAction("rejected")}
+                    >
+                      <XCircle size={16} />
+                      Reject
+                    </button>
+                  </div>
+                </div>
+
+                <div className="mm-edit-save-row">
+                  <button
+                    className="primary-button"
+                    onClick={handleRuleSave}
+                    disabled={savingRuleId === ruleDraft.id}
+                  >
+                    {savingRuleId === ruleDraft.id ? (
+                      <Loader2 className="spin" size={16} />
+                    ) : (
+                      <Save size={16} />
+                    )}
+                    Save Rule
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="mm-edit-empty">
+                <Edit3 size={36} strokeWidth={1.5} />
+                <p>Select a rule to edit</p>
+                <p className="mm-edit-empty-hint">Click the edit icon on any rule in the tree to open it here.</p>
+              </div>
+            )}
           </div>
-        </>
+        </div>
       )}
     </section>
   );
@@ -1121,6 +1374,12 @@ function MindmapSectionNode({
   rulesBySectionId,
   graph,
   depth,
+  selectedRuleId,
+  newRuleIds,
+  filteredRuleIds,
+  hoveredXrefCode,
+  onSelectRule,
+  onHoverXref,
 }: {
   section: Section;
   sectionById: Map<string, Section>;
@@ -1128,16 +1387,24 @@ function MindmapSectionNode({
   rulesBySectionId: Map<string, Rule[]>;
   graph: RuleGraph;
   depth: number;
+  selectedRuleId: string | null;
+  newRuleIds: Set<string>;
+  filteredRuleIds: Set<string>;
+  hoveredXrefCode: string | null;
+  onSelectRule: (rule: Rule) => void;
+  onHoverXref: (code: string | null) => void;
 }) {
-  const [expanded, setExpanded] = useState(depth < 2);
   const sectionRules = rulesBySectionId.get(section.id) || [];
+  const hasNewRules = sectionRules.some((r) => newRuleIds.has(r.id));
+  const [expanded, setExpanded] = useState(depth < 2 || hasNewRules);
   const hasChildren = section.children.length > 0 || sectionRules.length > 0;
   const indentClass = depth > 0 ? `mm-indent-${Math.min(depth, 4)}` : "";
+  const isXrefTarget = hoveredXrefCode && sectionCode(section) === hoveredXrefCode;
 
   return (
     <div className={`mm-section-node ${indentClass}`}>
       <div
-        className={`mm-section-header ${hasChildren ? "clickable" : ""} ${sectionRules.length > 0 ? "has-rules" : ""}`}
+        className={`mm-section-header ${hasChildren ? "clickable" : ""} ${sectionRules.length > 0 ? "has-rules" : ""} ${isXrefTarget ? "xref-target" : ""}`}
         onClick={() => hasChildren && setExpanded(!expanded)}
         role={hasChildren ? "button" : undefined}
         tabIndex={hasChildren ? 0 : undefined}
@@ -1161,6 +1428,12 @@ function MindmapSectionNode({
               sectionById={sectionById}
               sectionByCode={sectionByCode}
               graph={graph}
+              isSelected={selectedRuleId === rule.id}
+              isNew={newRuleIds.has(rule.id)}
+              isFiltered={filteredRuleIds.has(rule.id)}
+              hoveredXrefCode={hoveredXrefCode}
+              onSelectRule={onSelectRule}
+              onHoverXref={onHoverXref}
             />
           ))}
           {section.children.map((child) => (
@@ -1172,6 +1445,12 @@ function MindmapSectionNode({
               rulesBySectionId={rulesBySectionId}
               graph={graph}
               depth={depth + 1}
+              selectedRuleId={selectedRuleId}
+              newRuleIds={newRuleIds}
+              filteredRuleIds={filteredRuleIds}
+              hoveredXrefCode={hoveredXrefCode}
+              onSelectRule={onSelectRule}
+              onHoverXref={onHoverXref}
             />
           ))}
         </div>
@@ -1185,11 +1464,23 @@ function MindmapRuleNode({
   sectionById,
   sectionByCode,
   graph,
+  isSelected,
+  isNew,
+  isFiltered,
+  hoveredXrefCode,
+  onSelectRule,
+  onHoverXref,
 }: {
   rule: Rule;
   sectionById: Map<string, Section>;
   sectionByCode: Map<string, Section>;
   graph: RuleGraph;
+  isSelected: boolean;
+  isNew: boolean;
+  isFiltered: boolean;
+  hoveredXrefCode: string | null;
+  onSelectRule: (rule: Rule) => void;
+  onHoverXref: (code: string | null) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const typeColor = RULE_TYPE_COLORS[rule.type] || "#6b7280";
@@ -1199,25 +1490,57 @@ function MindmapRuleNode({
   }, [rule, sectionById, sectionByCode]);
   const relatedEdges = graph.edges.filter((e) => e.source === rule.id || e.target === rule.id);
   const hasDetails = rule.condition || rule.action || rule.options.length > 0 || refs.length > 0 || rule.dependencies.length > 0 || relatedEdges.length > 0;
+  const hasActiveXref = hoveredXrefCode && refs.some((r) => r.code === hoveredXrefCode);
+
+  if (!isFiltered) return null;
 
   return (
-    <div className="mm-rule-node">
+    <div className={`mm-rule-node ${isNew ? "mm-rule-node--new" : ""} ${isSelected ? "mm-rule-node--selected" : ""} ${hasActiveXref ? "has-active-xref" : ""}`}>
       <div
-        className={`mm-rule-header ${hasDetails ? "clickable" : ""}`}
-        onClick={() => hasDetails && setExpanded(!expanded)}
-        role={hasDetails ? "button" : undefined}
-        tabIndex={hasDetails ? 0 : undefined}
-        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpanded(!expanded); } }}
+        className="mm-rule-header clickable"
+        onClick={() => onSelectRule(rule)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelectRule(rule); } }}
       >
-        <span className={`mm-toggle small ${expanded ? "open" : ""}`}>
+        <span
+          className={`mm-toggle small ${expanded ? "open" : ""}`}
+          onClick={(e) => { e.stopPropagation(); hasDetails && setExpanded(!expanded); }}
+          title={hasDetails ? "Toggle details" : undefined}
+        >
           {hasDetails ? (expanded ? "▾" : "▸") : "·"}
+        </span>
+        <span className="mm-rule-status-pill" style={{
+          background: rule.review_status === "reviewed" ? "#f0fdf4" : rule.review_status === "rejected" ? "#fef2f2" : "#fffbeb",
+          color: rule.review_status === "reviewed" ? "#16a34a" : rule.review_status === "rejected" ? "#dc2626" : "#d97706",
+          borderColor: rule.review_status === "reviewed" ? "#bbf7d0" : rule.review_status === "rejected" ? "#fecaca" : "#fde68a"
+        }}>
+          {rule.review_status === "reviewed" ? "OK" : rule.review_status === "rejected" ? "NO" : "..."}
         </span>
         <span className="mm-rule-type" style={{ background: typeColor }}>{rule.type}</span>
         <span className="mm-rule-subject">{rule.subject || rule.action || rule.id}</span>
         <span className="mm-confidence">{Math.round(rule.confidence * 100)}%</span>
+        <button
+          className="mm-rule-edit-btn"
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onSelectRule(rule); }}
+          title="Edit rule"
+          aria-label="Edit rule"
+        >
+          <Edit3 size={16} />
+        </button>
       </div>
       {expanded && (
         <div className="mm-rule-detail">
+          {/* Heading path breadcrumb */}
+          {(rule.source.heading_path || []).length > 0 && (
+            <div className="mm-detail-row">
+              <span className="mm-detail-label">Source</span>
+              <span className="mm-detail-value" style={{ fontSize: 12, color: "#64748b" }}>
+                {rule.source.heading_path.join(" > ")}
+              </span>
+            </div>
+          )}
           {rule.condition && (
             <div className="mm-detail-row">
               <span className="mm-detail-label">Condition</span>
@@ -1247,8 +1570,13 @@ function MindmapRuleNode({
               <span className="mm-detail-label">Refs</span>
               <span className="mm-detail-value">
                 {refs.map((r) => (
-                  <span key={r.code} className={`mm-ref ${r.resolved ? "" : "unresolved"}`}>
-                    {r.code} {r.resolved ? `→ ${r.title.slice(0, 60)}` : "(unresolved)"}
+                  <span
+                    key={r.code}
+                    className={`mm-ref ${r.resolved ? "" : "unresolved"}`}
+                    onMouseEnter={() => onHoverXref(r.code)}
+                    onMouseLeave={() => onHoverXref(null)}
+                  >
+                    {r.code} {r.resolved ? `→ ${r.title.slice(0, 60)}` : "(not yet extracted)"}
                   </span>
                 ))}
               </span>
@@ -1320,14 +1648,6 @@ function visibleStats(stats: DocumentStats | null, status?: string): [string, st
   if (status === "mineru_queued" || status === "mineru_processing") return [];
   if (status === "mineru_failed" || status === "rule_extraction_failed" || status === "rule_extraction_queued") return [];
   if (status === "markdown_ready") return [["Sections", stats.total_sections]];
-  if (status === "classifying_sections") {
-    return [
-      ["Sections", stats.total_sections],
-      ["Classified", stats.classified_sections],
-      ["Candidates", stats.candidate_sections],
-      ["Windows", `${stats.llm_windows_completed}/${stats.llm_windows_total}`]
-    ];
-  }
   if (status === "extracting_rules") {
     const result: [string, string | number][] = [
       ["Windows", `${stats.llm_windows_completed}/${stats.llm_windows_total}`],
@@ -1375,8 +1695,8 @@ function labelStatus(status: string) {
 
 function defaultViewForStatus(status: string): View {
   if (status === "markdown_ready") return "review";
-  if (["rule_extraction_queued", "classifying_sections", "extracting_rules"].includes(status)) return "processing";
-  if (["rules_extracted", "rule_extraction_failed"].includes(status)) return "rules";
+  if (["rule_extraction_queued", "extracting_rules"].includes(status)) return "processing";
+  if (["rules_extracted", "rule_extraction_failed"].includes(status)) return "map";
   return "processing";
 }
 
@@ -1385,8 +1705,8 @@ function viewLabel(view: View) {
     import: "Import PDF",
     processing: "Processing",
     review: "Document Review",
-    rules: "Rules",
-    map: "Rule Logic Review"
+    map: "Rule Logic Review",
+    kb: "Knowledge Base"
   };
   return labels[view];
 }
