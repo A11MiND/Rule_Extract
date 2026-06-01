@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
@@ -182,257 +183,180 @@ class ExtractRulesResponse(BaseModel):
 SectionRead.model_rebuild()
 
 
-# ──────────────────────────────────────────────
-# Phase 0 — Knowledge Base
-# ──────────────────────────────────────────────
-
-SourceType = Literal["clause", "template_spec", "policy", "department_rule"]
-MappingType = Literal["rule_to_section", "clause_to_section", "policy_to_section"]
-
-
-class KnowledgeItemCreate(BaseModel):
-    id: str = Field(min_length=1)
-    source_type: SourceType
-    source_document: str = Field(min_length=1)
-    source_url: str | None = None
-    title: str = Field(min_length=1)
-    content: str = Field(min_length=1)
-    summary: str | None = None
-    clause_number: str | None = None
-    clause_category: str | None = None
-    parent_document: str | None = None
-    clause_remarks: str | None = None
-    template_name: str | None = None
-    section_number: str | None = None
-    field_definitions: str | None = None
-    circular_number: str | None = None
-    issuing_body: str | None = None
-    effective_date: str | None = None
-    supersedes: str | None = None
-    department: str | None = None
-    chapter: str | None = None
-    section_ref: str | None = None
-    version: str = "1.0"
-    is_active: bool = True
-    metadata_json: dict[str, Any] = Field(default_factory=dict)
+class CollectionCreate(BaseModel):
+    name: str = Field(min_length=1)
+    contract_family: str = "ECC"
+    jurisdiction: str = "Hong Kong"
+    version: str = "2024"
+    status: str = "active"
 
 
-class KnowledgeItemUpdate(BaseModel):
-    title: str | None = None
-    content: str | None = None
-    summary: str | None = None
-    is_active: bool | None = None
-    metadata_json: dict[str, Any] | None = None
-
-
-class KnowledgeItemRead(BaseModel):
+class CollectionRead(CollectionCreate):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    source_type: str
-    source_document: str
-    source_url: str | None = None
-    title: str
-    content: str
-    summary: str | None = None
-    clause_number: str | None = None
-    clause_category: str | None = None
-    parent_document: str | None = None
-    clause_remarks: str | None = None
-    template_name: str | None = None
-    section_number: str | None = None
-    field_definitions: str | None = None
-    circular_number: str | None = None
-    issuing_body: str | None = None
-    effective_date: str | None = None
-    supersedes: str | None = None
-    department: str | None = None
-    chapter: str | None = None
-    section_ref: str | None = None
-    version: str = "1.0"
-    is_active: bool = True
-    embedding_id: str | None = None
-    metadata_json: dict[str, Any] = Field(default_factory=dict)
-    created_at: str | None = None
-    updated_at: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
-class KnowledgeItemStats(BaseModel):
-    total: int = 0
-    active: int = 0
-    inactive: int = 0
-    by_type: dict[str, int] = Field(default_factory=dict)
+class SourceDocumentCreate(BaseModel):
+    collection_id: str
+    doc_type: Literal["rulebook", "reference_clause", "template", "tender_submission"]
+    name: str = Field(min_length=1)
+    pdf_url: str = ""
+    linked_document_id: int | None = None
 
 
-class IngestResponse(BaseModel):
-    status: str
-    task_id: str | None = None
-
-
-class IngestStatus(BaseModel):
-    status: str
-    progress: str = ""
-    errors: int = 0
-
-
-# ──────────────────────────────────────────────
-# Phase 1 — Mappings
-# ──────────────────────────────────────────────
-
-
-class MappingRead(BaseModel):
+class SourceDocumentRead(SourceDocumentCreate):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    knowledge_item_id: str
-    knowledge_item_title: str = ""
+    status: str
+    mineru_artifacts: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class TemplateFieldCreate(BaseModel):
+    collection_id: str
+    source_document_id: str | None = None
+    template_doc: str
+    field_key: str
+    label: str
+    anchor_text: str = ""
+    input_type: str = "text"
+    required: bool = True
+    section_ref: str | None = None
+    extraction_hint: str = ""
+    review_status: Literal["suggested", "approved", "rejected", "needs_edit"] = "suggested"
+
+
+class TemplateFieldUpdate(BaseModel):
+    label: str | None = None
+    anchor_text: str | None = None
+    input_type: str | None = None
+    required: bool | None = None
+    section_ref: str | None = None
+    extraction_hint: str | None = None
+    review_status: Literal["suggested", "approved", "rejected", "needs_edit"] | None = None
+
+
+class TemplateFieldRead(TemplateFieldCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ExtractFieldsResponse(BaseModel):
+    document_id: str
+    fields_created: int
+
+
+class FieldRuleMappingCreate(BaseModel):
+    collection_id: str
+    template_field_id: str
     rule_id: str | None = None
-    rule_subject: str | None = None
-    template_section_id: str | None = None
-    template_section_title: str = ""
-    mapping_type: str
-    confidence: float
+    source_type: str = "rule"
+    check_type: Literal["deterministic", "llm", "hybrid", "manual"] = "llm"
+    applicability_condition: str = ""
+    confidence: float = Field(default=0.0, ge=0, le=1)
     rationale: str = ""
-    human_confirmed: bool = False
-    human_decision: str | None = None
-    created_at: str | None = None
+    review_status: Literal["suggested", "approved", "rejected", "needs_edit"] = "suggested"
+    review_notes: str = ""
 
 
-class MappingUpdate(BaseModel):
-    human_confirmed: bool
-    human_decision: Literal["confirmed", "rejected"]
-    confirmed_by: str | None = None
+class FieldRuleMappingUpdate(BaseModel):
+    check_type: Literal["deterministic", "llm", "hybrid", "manual"] | None = None
+    applicability_condition: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    rationale: str | None = None
+    review_status: Literal["suggested", "approved", "rejected", "needs_edit"] | None = None
+    review_notes: str | None = None
 
 
-class MappingStats(BaseModel):
-    total: int = 0
-    confirmed: int = 0
-    pending: int = 0
-    rejected: int = 0
-
-
-# ──────────────────────────────────────────────
-# Phase 2 — Vetting
-# ──────────────────────────────────────────────
-
-
-class VettingRunRead(BaseModel):
+class FieldRuleMappingRead(FieldRuleMappingCreate):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    title: str
-    template_id: str
+    field_label: str = ""
+    rule_subject: str | None = None
+    created_at: datetime | str | None = None
+    updated_at: datetime | str | None = None
+
+
+class MappingRunCreate(BaseModel):
+    collection_id: str
+
+
+class MappingRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    collection_id: str
     status: str
-    source_file_path: str | None = None
-    source_file_type: str | None = None
-    total_sections: int = 0
-    completed_sections: int = 0
-    total_findings: int = 0
-    critical_count: int = 0
-    high_count: int = 0
-    medium_count: int = 0
-    low_count: int = 0
+    llm_model: str
+    windows_total: int
+    windows_completed: int
+    failures: int
     error_message: str | None = None
-    created_at: str | None = None
-    completed_at: str | None = None
+    artifact_json: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
-class VettingFindingRead(BaseModel):
+class TenderSubmissionCreate(BaseModel):
+    collection_id: str
+    name: str = Field(min_length=1)
+    source_document_ids: list[str] = Field(default_factory=list)
+
+
+class TenderSubmissionRead(TenderSubmissionCreate):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    vetting_run_id: str
-    section_id: str
-    skill: str
-    rule_id: str | None = None
-    verdict: str
-    severity: str
-    title: str
-    detail: str
-    tender_excerpt: str | None = None
-    rule_excerpt: str | None = None
-    human_reviewed: bool = False
-    human_verdict: str | None = None
-    human_comment: str | None = None
-    created_at: str | None = None
+    status: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
 
-class VettingFindingUpdate(BaseModel):
-    human_reviewed: bool | None = None
-    human_verdict: Literal["confirmed", "dismissed", "commented"] | None = None
-    human_comment: str | None = None
-
-
-class VettingRunListParams(BaseModel):
-    status: str | None = None
-    limit: int = Field(default=20, ge=1, le=100)
-    offset: int = Field(default=0, ge=0)
-
-
-class VettingFindingsParams(BaseModel):
-    skill: str | None = None
-    severity: str | None = None
-    section_id: str | None = None
-    verdict: str | None = None
-    human_reviewed: bool | None = None
-    limit: int = Field(default=200, ge=1, le=1000)
-    offset: int = Field(default=0, ge=0)
-
-
-# ──────────────────────────────────────────────
-# Phase 3 — Chat
-# ──────────────────────────────────────────────
-
-
-class ChatSessionRead(BaseModel):
+class TenderFieldEvidenceRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: str
-    title: str
-    created_at: str | None = None
-    updated_at: str | None = None
-
-
-class ChatSessionDetail(ChatSessionRead):
-    messages: list["ChatMessageRead"] = Field(default_factory=list)
-
-
-class Citation(BaseModel):
-    kb_id: str
-    title: str
-    excerpt: str = ""
-
-
-class ChatMessageRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: str
-    session_id: str
-    role: str
-    content: str
-    citations: list[Citation] = Field(default_factory=list)
-    token_count: int | None = None
-    created_at: str | None = None
-
-
-class ChatMessageCreate(BaseModel):
-    content: str = Field(min_length=1)
-
-
-# ──────────────────────────────────────────────
-# Phase 0 — Ingestion Log
-# ──────────────────────────────────────────────
-
-
-class IngestionLogRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
+    submission_id: str
+    template_field_id: str
+    value: str
+    raw_text: str
     source_document: str
-    source_type: str
-    status: str
-    items_created: int = 0
-    items_updated: int = 0
-    error_message: str | None = None
-    started_at: str | None = None
-    completed_at: str | None = None
+    page_or_section: str
+    confidence: float
+    review_status: str
+    created_at: datetime | None = None
+
+
+class EvidenceExtractionResponse(BaseModel):
+    submission_id: str
+    evidence_created: int
+
+
+class CheckResultRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    submission_id: str
+    template_field_id: str
+    mapping_id: str | None = None
+    result: str
+    severity: str
+    reason: str
+    rule_evidence: str
+    tender_evidence: str
+    review_status: str
+    created_at: datetime | None = None
+
+
+class RunChecksResponse(BaseModel):
+    submission_id: str
+    results_created: int

@@ -393,6 +393,53 @@ RAG should support retrieval and explanation. The actual audit decision should b
 - Rules page with cards, filters, edit, and export.
 - Rule Logic Review page with collapsible section/rule tree.
 - History selector and New Work button.
+- Workflow page for the rulebook-to-template-to-vetting POC:
+  - `Library`: register rulebooks, reference clauses, templates, and tender submissions in one collection.
+  - `Templates`: extract and review CDP1/CDP2/FOT/AOA template fields.
+  - `Mappings`: generate suggested template-field-to-rule mappings and approve/reject them.
+  - `Tender Vetting`: create a tender submission, extract field evidence, and run approved mapping checks.
+  - `Results`: open and delete prior submission results.
+  - `Settings`: create/delete collections and switch active scope.
+
+### Implemented Mapping POC
+
+The first implementation keeps the existing Practice Note rule extraction flow and adds a compatible workflow layer:
+
+- `document_collections` isolate rulebooks, reference sources, templates, mappings, submissions, evidence, and results.
+- `source_documents` registers each imported/linked PDF as `rulebook`, `reference_clause`, `template`, or `tender_submission`.
+- `template_fields` stores CDP1/CDP2/FOT/AOA reviewable fields. The POC includes seeded NEC ECC HK fields for common CDP1/CDP2/FOT/AOA checks and can fall back to linked MinerU sections containing placeholders.
+- `field_rule_mappings` stores LLM-suggested mappings from a template field to an existing rule. Suggested mappings are not audit-authoritative until a reviewer approves them.
+- `mapping_runs` records each mapping run.
+- `tender_submissions`, `tender_field_evidence`, and `check_results` store the tender review workflow.
+
+Mapping suggestions use a two-stage pipeline: a lightweight keyword pre-filter narrows the rule book to ~20 candidate rules per field, then the LLM picks the top 5 with rationale and confidence:
+
+`template field -> keyword pre-filter -> LLM rank top 5 -> suggested mappings -> SME approval`
+
+Evidence extraction and vetting checks also call the LLM: each (field, tender section) pair returns a structured value, and each (field, mapped rule, evidence) triple returns pass/fail/needs_review with a reason. The current vetting check only executes approved mappings.
+
+### Implemented Workflow APIs
+
+- `POST /api/collections`
+- `GET /api/collections`
+- `DELETE /api/collections/{id}`
+- `POST /api/source-documents`
+- `GET /api/source-documents`
+- `DELETE /api/source-documents/{id}`
+- `POST /api/templates/{document_id}/extract-fields`
+- `GET /api/template-fields`
+- `PUT /api/template-fields/{id}`
+- `DELETE /api/template-fields/{id}`
+- `POST /api/mapping-runs`
+- `GET /api/mapping-runs/{id}`
+- `GET /api/field-rule-mappings`
+- `PUT /api/field-rule-mappings/{id}`
+- `POST /api/tender-submissions`
+- `GET /api/tender-submissions`
+- `POST /api/tender-submissions/{id}/extract-evidence`
+- `POST /api/tender-submissions/{id}/run-checks`
+- `GET /api/tender-submissions/{id}/results`
+- `DELETE /api/tender-submissions/{id}`
 
 ### Future UI
 

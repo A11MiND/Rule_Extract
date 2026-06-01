@@ -115,131 +115,113 @@ export interface RuleGraph {
   edges: { source: string; target: string; label: string }[];
 }
 
-// ── Phase 0 — Knowledge Base ──────────────────────────────
 
-export interface KnowledgeItem {
+export interface DocumentCollection {
   id: string;
-  source_type: string;
-  source_document: string;
-  source_url?: string | null;
-  title: string;
-  content: string;
-  summary?: string | null;
-  clause_number?: string | null;
-  clause_category?: string | null;
-  parent_document?: string | null;
-  clause_remarks?: string | null;
-  template_name?: string | null;
-  section_number?: string | null;
-  field_definitions?: string | null;
-  circular_number?: string | null;
-  issuing_body?: string | null;
-  effective_date?: string | null;
-  supersedes?: string | null;
-  department?: string | null;
-  chapter?: string | null;
-  section_ref?: string | null;
+  name: string;
+  contract_family: string;
+  jurisdiction: string;
   version: string;
-  is_active: boolean;
-  embedding_id?: string | null;
-  metadata_json: Record<string, unknown>;
-  created_at: string;
-  updated_at: string;
+  status: string;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
-export interface KBStats {
-  total: number;
-  active: number;
-  inactive: number;
-  by_type: Record<string, number>;
-}
-
-// ── Phase 1 — Mappings ───────────────────────────────────
-
-export interface Mapping {
+export interface SourceDocument {
   id: string;
-  knowledge_item_id: string;
-  knowledge_item_title: string;
+  collection_id: string;
+  doc_type: "rulebook" | "reference_clause" | "template" | "tender_submission";
+  name: string;
+  pdf_url: string;
+  status: string;
+  mineru_artifacts: Record<string, unknown>;
+  linked_document_id?: number | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface TemplateField {
+  id: string;
+  collection_id: string;
+  source_document_id?: string | null;
+  template_doc: string;
+  field_key: string;
+  label: string;
+  anchor_text: string;
+  input_type: string;
+  required: boolean;
+  section_ref?: string | null;
+  extraction_hint: string;
+  review_status: "suggested" | "approved" | "rejected" | "needs_edit";
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface FieldRuleMapping {
+  id: string;
+  collection_id: string;
+  template_field_id: string;
   rule_id?: string | null;
-  rule_subject?: string | null;
-  template_section_id?: string | null;
-  template_section_title: string;
-  mapping_type: string;
+  source_type: string;
+  check_type: "deterministic" | "llm" | "hybrid" | "manual";
+  applicability_condition: string;
   confidence: number;
   rationale: string;
-  human_confirmed: boolean;
-  human_decision?: string | null;
-  created_at: string;
+  review_status: "suggested" | "approved" | "rejected" | "needs_edit";
+  review_notes: string;
+  field_label: string;
+  rule_subject?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
 }
 
-export interface MappingStats {
-  total: number;
-  confirmed: number;
-  pending: number;
-  rejected: number;
-}
-
-// ── Phase 2 — Vetting ────────────────────────────────────
-
-export interface VettingRun {
+export interface MappingRun {
   id: string;
-  title: string;
-  template_id: string;
+  collection_id: string;
   status: string;
-  source_file_path?: string | null;
-  source_file_type?: string | null;
-  total_sections: number;
-  completed_sections: number;
-  total_findings: number;
-  critical_count: number;
-  high_count: number;
-  medium_count: number;
-  low_count: number;
+  llm_model: string;
+  windows_total: number;
+  windows_completed: number;
+  failures: number;
   error_message?: string | null;
-  created_at: string;
+  artifact_json: Record<string, unknown>;
+  created_at?: string | null;
   completed_at?: string | null;
 }
 
-export interface VettingFinding {
+export interface TenderSubmission {
   id: string;
-  vetting_run_id: string;
-  section_id: string;
-  skill: string;
-  rule_id?: string | null;
-  verdict: string;
+  collection_id: string;
+  name: string;
+  status: string;
+  source_document_ids: string[];
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface TenderFieldEvidence {
+  id: string;
+  submission_id: string;
+  template_field_id: string;
+  value: string;
+  raw_text: string;
+  source_document: string;
+  page_or_section: string;
+  confidence: number;
+  review_status: string;
+  created_at?: string | null;
+}
+
+export interface CheckResult {
+  id: string;
+  submission_id: string;
+  template_field_id: string;
+  mapping_id?: string | null;
+  result: "pass" | "fail" | "needs_review" | "not_applicable";
   severity: string;
-  title: string;
-  detail: string;
-  tender_excerpt?: string | null;
-  rule_excerpt?: string | null;
-  human_reviewed: boolean;
-  human_verdict?: string | null;
-  human_comment?: string | null;
-  created_at: string;
-}
-
-// ── Phase 3 — Chat ───────────────────────────────────────
-
-export interface ChatSession {
-  id: string;
-  title: string;
-  messages?: ChatMessage[];
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ChatMessage {
-  id: string;
-  session_id: string;
-  role: "user" | "assistant" | "system";
-  content: string;
-  citations: Citation[];
-  token_count?: number | null;
-  created_at: string;
-}
-
-export interface Citation {
-  kb_id: string;
-  title: string;
-  excerpt: string;
+  reason: string;
+  rule_evidence: string;
+  tender_evidence: string;
+  review_status: string;
+  created_at?: string | null;
 }

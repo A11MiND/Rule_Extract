@@ -3,7 +3,6 @@ import { debounce } from "./utils/debounce";
 import {
   AlertCircle,
   CheckCircle2,
-  ChevronRight,
   Check,
   Download,
   Edit3,
@@ -18,9 +17,7 @@ import {
   Settings,
   X,
   XCircle,
-  Zap,
-  Clock,
-  Library
+  Zap
 } from "lucide-react";
 import {
   createDocument,
@@ -37,7 +34,7 @@ import {
   saveRuntimeConfig,
   saveSection
 } from "./api";
-import { KBWorkspace } from "./components/KBWorkspace";
+import { WorkflowWorkspace } from "./components/WorkflowWorkspace";
 import type {
   DocumentJob,
   DocumentStats,
@@ -56,7 +53,7 @@ const READY_STATUSES = new Set([
   "rule_extraction_failed"
 ]);
 const TERMINAL_STATUSES = new Set(["mineru_failed", "rule_extraction_failed", "rules_extracted"]);
-const VIEWS = ["import", "processing", "review", "map", "kb"] as const;
+const VIEWS = ["workflow", "processing", "review", "map", "config"] as const;
 type View = (typeof VIEWS)[number];
 
 export function App() {
@@ -67,7 +64,7 @@ export function App() {
   const [sections, setSections] = useState<Section[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
   const [graph, setGraph] = useState<RuleGraph>({ nodes: [], edges: [] });
-  const [activeView, setActiveView] = useState<View>("import");
+  const [activeView, setActiveView] = useState<View>("workflow");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState<{ text: string; type: "success" | "info" } | null>(null);
@@ -91,7 +88,6 @@ export function App() {
         if (documents.length) {
           const latestDocument = documents[0];
           setDocumentJob(latestDocument);
-          setActiveView(defaultViewForStatus(latestDocument.status));
         }
       })
       .catch(() => undefined);
@@ -322,9 +318,32 @@ export function App() {
     }
   }
 
+  async function handleOpenDocument(documentId: number, view: "review" | "map" | "processing") {
+    if (!documentId) return;
+    setBusy(true);
+    setError("");
+    try {
+      const selected = await getDocument(documentId);
+      setDocumentJob(selected);
+      previousStatusRef.current = selected.status;
+      setActiveView(view);
+      setSections([]);
+      setRules([]);
+      setGraph({ nodes: [], edges: [] });
+      setStats(null);
+      if (READY_STATUSES.has(selected.status)) {
+        refreshDocumentData(selected.id);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to open document");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function handleNewWork() {
     setDocumentJob(null);
-    setActiveView("import");
+    setActiveView("workflow");
     setSections([]);
     setRules([]);
     setGraph({ nodes: [], edges: [] });
@@ -336,7 +355,7 @@ export function App() {
 
   const canExtractRules =
     documentJob &&
-    activeView !== "import" &&
+    activeView !== "workflow" &&
     (documentJob.status === "markdown_ready" ||
       documentJob.status === "rule_extraction_failed" ||
       (documentJob.status === "rules_extracted" && (stats?.rules_extracted ?? rules.length) === 0));
@@ -408,10 +427,15 @@ export function App() {
         </div>
       ) : null}
 
-      {activeView === "import" ? (
+      {activeView === "workflow" ? (
+        <section className="portal-page">
+          <WorkflowWorkspace onOpenDocument={handleOpenDocument} />
+        </section>
+      ) : null}
+
+      {activeView === "config" ? (
         <section className="portal-page import-page">
           <RuntimeConfigPanel runtimeConfig={runtimeConfig} onSave={handleSaveRuntimeConfig} busy={busy} />
-          <ImportPanel onCreate={handleCreate} busy={busy} runtimeConfig={runtimeConfig} />
           <ExtractionSettingsPanel runtimeConfig={runtimeConfig} onSave={handleSaveRuntimeConfig} busy={busy} />
         </section>
       ) : null}
@@ -441,12 +465,6 @@ export function App() {
         </section>
       ) : null}
 
-      {activeView === "kb" ? (
-        <section className="portal-page">
-          <KBWorkspace />
-        </section>
-      ) : null}
-
       {canExtractRules ? (
         <div className="action-bar">
           <button className="primary-button" onClick={handleExtract} disabled={busy}>
@@ -459,64 +477,6 @@ export function App() {
   );
 }
 
-function ImportPanel({
-  onCreate,
-  busy,
-  runtimeConfig
-}: {
-  onCreate: (payload: { name: string; pdf_url: string; grouping_level?: number }) => void;
-  busy: boolean;
-  runtimeConfig: RuntimeConfig | null;
-}) {
-  const [name, setName] = useState("NEC Practice Note Demo");
-  const [pdfUrl, setPdfUrl] = useState("");
-  const [groupingLevel, setGroupingLevel] = useState(runtimeConfig?.default_grouping_level ?? 2);
-
-  return (
-    <section className="panel">
-      <div className="panel-title">
-        <FileText size={20} />
-        <h2>Import PDF</h2>
-      </div>
-      <form
-        className="form-stack"
-        onSubmit={(event) => {
-          event.preventDefault();
-          onCreate({ name, pdf_url: pdfUrl, grouping_level: groupingLevel });
-        }}
-      >
-        <label>
-          Document name
-          <input value={name} onChange={(event) => setName(event.target.value)} required />
-        </label>
-        <label>
-          Public PDF URL
-          <input
-            value={pdfUrl}
-            onChange={(event) => setPdfUrl(event.target.value)}
-            placeholder="https://example.com/nec-practice-note.pdf"
-            required
-            type="url"
-          />
-        </label>
-        <label>
-          Group by
-          <select value={groupingLevel} onChange={(event) => setGroupingLevel(Number(event.target.value))}>
-            <option value={1}>Part (H1)</option>
-            <option value={2}>Chapter (H2)</option>
-            <option value={3}>Sub-chapter (H3)</option>
-          </select>
-          <span className="hint">Split document at this heading level for rule extraction.</span>
-        </label>
-        <button className="primary-button" type="submit" disabled={busy}>
-          {busy ? <Loader2 className="spin" size={18} /> : <ChevronRight size={18} />}
-          Start MinerU
-        </button>
-        {!runtimeConfig?.mineru_configured ? <p className="error-text">MinerU token is required before import.</p> : null}
-      </form>
-    </section>
-  );
-}
 
 function RuntimeConfigPanel({
   runtimeConfig,
@@ -1702,11 +1662,11 @@ function defaultViewForStatus(status: string): View {
 
 function viewLabel(view: View) {
   const labels: Record<View, string> = {
-    import: "Import PDF",
+    workflow: "Workflow",
     processing: "Processing",
     review: "Document Review",
     map: "Rule Logic Review",
-    kb: "Knowledge Base"
+    config: "API Config"
   };
   return labels[view];
 }

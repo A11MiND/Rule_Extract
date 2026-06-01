@@ -20,7 +20,7 @@ from .services.extraction import extract_rules
 from .services.llm import LLMClient, LLMError
 from .services.markdown import build_section_tree, parse_markdown_sections, parse_mineru_content_sections
 from .services.mineru import MinerUClient, MinerUError
-from .routers import knowledge, mappings, vetting
+from .routers import workflow
 from .runtime_config import (
     effective_llm_key,
     effective_mineru_token,
@@ -33,9 +33,7 @@ from .runtime_config import (
 app = FastAPI(title="NEC Rule Extraction Demo")
 app.mount("/storage", StaticFiles(directory=settings.storage_root), name="storage")
 
-app.include_router(knowledge.router)
-app.include_router(mappings.router)
-app.include_router(vetting.router)
+app.include_router(workflow.router)
 
 app.add_middleware(
     CORSMiddleware,

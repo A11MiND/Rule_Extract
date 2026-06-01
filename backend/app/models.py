@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -83,181 +83,214 @@ class Rule(Base):
     document: Mapped[Document] = relationship(back_populates="rules")
 
 
-# ──────────────────────────────────────────────
-# Phase 0 — Knowledge Base & Mapping
-# ──────────────────────────────────────────────
 
-
-class KnowledgeItem(Base):
-    __tablename__ = "knowledge_items"
+class DocumentCollection(Base):
+    __tablename__ = "document_collections"
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
-    source_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    source_document: Mapped[str] = mapped_column(Text, nullable=False)
-    source_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    title: Mapped[str] = mapped_column(Text, nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    # Clause-specific
-    clause_number: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
-    clause_category: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
-    parent_document: Mapped[Optional[str]] = mapped_column(String(8), nullable=True, index=True)
-    clause_remarks: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    # Template-specific
-    template_name: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
-    section_number: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
-    field_definitions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    # Policy-specific
-    circular_number: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    issuing_body: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
-    effective_date: Mapped[Optional[datetime]] = mapped_column(Date, nullable=True)
-    supersedes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    # Department-rule specific
-    department: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
-    chapter: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
-    section_ref: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
-
-    version: Mapped[str] = mapped_column(String(16), default="1.0")
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
-    embedding_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    metadata_json: Mapped[dict] = mapped_column(JsonType, default=dict)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    contract_family: Mapped[str] = mapped_column(String(32), nullable=False, default="ECC")
+    jurisdiction: Mapped[str] = mapped_column(String(64), nullable=False, default="Hong Kong")
+    version: Mapped[str] = mapped_column(String(32), nullable=False, default="2024")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active", index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+    source_documents: Mapped[list["SourceDocument"]] = relationship(
+        back_populates="collection", cascade="all, delete-orphan"
+    )
+    template_fields: Mapped[list["TemplateField"]] = relationship(
+        back_populates="collection", cascade="all, delete-orphan"
+    )
+    field_rule_mappings: Mapped[list["FieldRuleMapping"]] = relationship(
+        back_populates="collection", cascade="all, delete-orphan"
+    )
+    mapping_runs: Mapped[list["MappingRun"]] = relationship(
+        back_populates="collection", cascade="all, delete-orphan"
+    )
+    tender_submissions: Mapped[list["TenderSubmission"]] = relationship(
+        back_populates="collection", cascade="all, delete-orphan"
+    )
 
-class Mapping(Base):
-    __tablename__ = "mappings"
+
+class SourceDocument(Base):
+    __tablename__ = "source_documents"
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
-    knowledge_item_id: Mapped[str] = mapped_column(
-        ForeignKey("knowledge_items.id", ondelete="CASCADE"), index=True
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("document_collections.id", ondelete="CASCADE"), index=True
+    )
+    doc_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    pdf_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(64), nullable=False, default="created", index=True)
+    mineru_artifacts: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)
+    linked_document_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    collection: Mapped[DocumentCollection] = relationship(back_populates="source_documents")
+    template_fields: Mapped[list["TemplateField"]] = relationship(
+        back_populates="source_document", cascade="all, delete-orphan"
+    )
+
+
+class TemplateField(Base):
+    __tablename__ = "template_fields"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("document_collections.id", ondelete="CASCADE"), index=True
+    )
+    source_document_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("source_documents.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    template_doc: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    field_key: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    anchor_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    input_type: Mapped[str] = mapped_column(String(32), nullable=False, default="text")
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    section_ref: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    extraction_hint: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    review_status: Mapped[str] = mapped_column(String(32), nullable=False, default="suggested", index=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    collection: Mapped[DocumentCollection] = relationship(back_populates="template_fields")
+    source_document: Mapped[Optional[SourceDocument]] = relationship(back_populates="template_fields")
+    mappings: Mapped[list["FieldRuleMapping"]] = relationship(
+        back_populates="template_field", cascade="all, delete-orphan"
+    )
+
+
+class FieldRuleMapping(Base):
+    __tablename__ = "field_rule_mappings"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("document_collections.id", ondelete="CASCADE"), index=True
+    )
+    template_field_id: Mapped[str] = mapped_column(
+        ForeignKey("template_fields.id", ondelete="CASCADE"), index=True
     )
     rule_id: Mapped[Optional[str]] = mapped_column(
-        ForeignKey("rules.id", ondelete="CASCADE"), nullable=True, index=True
+        ForeignKey("rules.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    template_section_id: Mapped[Optional[str]] = mapped_column(
-        ForeignKey("knowledge_items.id", ondelete="CASCADE"), nullable=True, index=True
-    )
-    mapping_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="rule")
+    check_type: Mapped[str] = mapped_column(String(32), nullable=False, default="llm")
+    applicability_condition: Mapped[str] = mapped_column(Text, nullable=False, default="")
     confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     rationale: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    human_confirmed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    human_decision: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
-    confirmed_by: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    review_status: Mapped[str] = mapped_column(String(32), nullable=False, default="suggested", index=True)
+    review_notes: Mapped[str] = mapped_column(Text, nullable=False, default="")
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-
-# ──────────────────────────────────────────────
-# Phase 2 — Vetting Pipeline
-# ──────────────────────────────────────────────
+    collection: Mapped[DocumentCollection] = relationship(back_populates="field_rule_mappings")
+    template_field: Mapped[TemplateField] = relationship(back_populates="mappings")
 
 
-class VettingRun(Base):
-    __tablename__ = "vetting_runs"
+class MappingRun(Base):
+    __tablename__ = "mapping_runs"
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
-    title: Mapped[str] = mapped_column(Text, nullable=False)
-    template_id: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="created", index=True
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("document_collections.id", ondelete="CASCADE"), index=True
     )
-    source_file_path: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    source_file_type: Mapped[Optional[str]] = mapped_column(String(8), nullable=True)
-    total_sections: Mapped[int] = mapped_column(Integer, default=0)
-    completed_sections: Mapped[int] = mapped_column(Integer, default=0)
-    total_findings: Mapped[int] = mapped_column(Integer, default=0)
-    critical_count: Mapped[int] = mapped_column(Integer, default=0)
-    high_count: Mapped[int] = mapped_column(Integer, default=0)
-    medium_count: Mapped[int] = mapped_column(Integer, default=0)
-    low_count: Mapped[int] = mapped_column(Integer, default=0)
-    report_json: Mapped[Optional[dict]] = mapped_column(JsonType, nullable=True, default=dict)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="created", index=True)
+    llm_model: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    windows_total: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    windows_completed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-
-
-class VettingFinding(Base):
-    __tablename__ = "vetting_findings"
-
-    id: Mapped[str] = mapped_column(Text, primary_key=True)
-    vetting_run_id: Mapped[str] = mapped_column(
-        ForeignKey("vetting_runs.id", ondelete="CASCADE"), index=True
-    )
-    section_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    skill: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    rule_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    verdict: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    severity: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
-    title: Mapped[str] = mapped_column(Text, nullable=False)
-    detail: Mapped[str] = mapped_column(Text, nullable=False)
-    tender_excerpt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    rule_excerpt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    human_reviewed: Mapped[bool] = mapped_column(Boolean, default=False)
-    human_verdict: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
-    human_comment: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    artifact_json: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    collection: Mapped[DocumentCollection] = relationship(back_populates="mapping_runs")
 
 
-# ──────────────────────────────────────────────
-# Phase 3 — Chatbot
-# ──────────────────────────────────────────────
-
-
-class ChatSession(Base):
-    __tablename__ = "chat_sessions"
+class TenderSubmission(Base):
+    __tablename__ = "tender_submissions"
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
-    title: Mapped[str] = mapped_column(Text, nullable=False, default="New Chat")
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("document_collections.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="created", index=True)
+    source_document_ids: Mapped[list[str]] = mapped_column(JsonType, nullable=False, default=list)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
+    collection: Mapped[DocumentCollection] = relationship(back_populates="tender_submissions")
+    evidence: Mapped[list["TenderFieldEvidence"]] = relationship(
+        back_populates="submission", cascade="all, delete-orphan"
+    )
+    results: Mapped[list["CheckResult"]] = relationship(
+        back_populates="submission", cascade="all, delete-orphan"
+    )
 
-class ChatMessage(Base):
-    __tablename__ = "chat_messages"
+
+class TenderFieldEvidence(Base):
+    __tablename__ = "tender_field_evidence"
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
-    session_id: Mapped[str] = mapped_column(
-        ForeignKey("chat_sessions.id", ondelete="CASCADE"), index=True
+    submission_id: Mapped[str] = mapped_column(
+        ForeignKey("tender_submissions.id", ondelete="CASCADE"), index=True
     )
-    role: Mapped[str] = mapped_column(String(16), nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
-    citations: Mapped[dict] = mapped_column(JsonType, default=list)
-    token_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    template_field_id: Mapped[str] = mapped_column(
+        ForeignKey("template_fields.id", ondelete="CASCADE"), index=True
+    )
+    value: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    raw_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    source_document: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    page_or_section: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    review_status: Mapped[str] = mapped_column(String(32), nullable=False, default="suggested", index=True)
 
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    submission: Mapped[TenderSubmission] = relationship(back_populates="evidence")
 
 
-# ──────────────────────────────────────────────
-# Phase 0 — Ingestion Audit
-# ──────────────────────────────────────────────
+class CheckResult(Base):
+    __tablename__ = "check_results"
 
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    submission_id: Mapped[str] = mapped_column(
+        ForeignKey("tender_submissions.id", ondelete="CASCADE"), index=True
+    )
+    template_field_id: Mapped[str] = mapped_column(
+        ForeignKey("template_fields.id", ondelete="CASCADE"), index=True
+    )
+    mapping_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("field_rule_mappings.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    result: Mapped[str] = mapped_column(String(32), nullable=False, default="needs_review", index=True)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False, default="medium")
+    reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    rule_evidence: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    tender_evidence: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    review_status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft", index=True)
 
-class IngestionLog(Base):
-    __tablename__ = "ingestion_logs"
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    source_document: Mapped[str] = mapped_column(Text, nullable=False)
-    source_type: Mapped[str] = mapped_column(String(32), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    items_created: Mapped[int] = mapped_column(Integer, default=0)
-    items_updated: Mapped[int] = mapped_column(Integer, default=0)
-    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    submission: Mapped[TenderSubmission] = relationship(back_populates="results")
