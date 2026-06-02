@@ -57,6 +57,10 @@ export function getDocument(id: number) {
   return request<DocumentJob>(`/api/documents/${id}`);
 }
 
+export function deleteDocument(id: number) {
+  return request<{ deleted: boolean }>(`/api/documents/${id}`, { method: "DELETE" });
+}
+
 export function getOutline(id: number) {
   return request<Section[]>(`/api/documents/${id}/outline`);
 }

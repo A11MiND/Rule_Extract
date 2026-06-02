@@ -15,12 +15,14 @@ import {
   Save,
   SearchCheck,
   Settings,
+  Trash2,
   X,
   XCircle,
   Zap
 } from "lucide-react";
 import {
   createDocument,
+  deleteDocument,
   extractRules,
   exportUrl,
   getDocument,
@@ -68,6 +70,7 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState<{ text: string; type: "success" | "info" } | null>(null);
+  const [workflowRefreshKey, setWorkflowRefreshKey] = useState(0);
   const previousStatusRef = useRef<string | null>(null);
 
   function showToast(text: string, type: "success" | "info" = "success") {
@@ -143,11 +146,11 @@ export function App() {
   useEffect(() => {
     const previousStatus = previousStatusRef.current;
     const nextStatus = documentJob?.status ?? null;
-    if (previousStatus && previousStatus !== "markdown_ready" && nextStatus === "markdown_ready") {
+    if (activeView === "processing" && previousStatus && previousStatus !== "markdown_ready" && nextStatus === "markdown_ready") {
       setActiveView("review");
     }
     previousStatusRef.current = nextStatus;
-  }, [documentJob?.status]);
+  }, [activeView, documentJob?.status]);
 
   useEffect(() => {
     if (!documentJob || TERMINAL_STATUSES.has(documentJob.status)) {
@@ -318,6 +321,39 @@ export function App() {
     }
   }
 
+  async function handleDeleteCurrentHistory() {
+    if (!documentJob) return;
+    const confirmed = window.confirm(`Delete history item #${documentJob.id} "${documentJob.name}"? This also removes its converted text, extracted rules, and workflow source record.`);
+    if (!confirmed) return;
+    setBusy(true);
+    setError("");
+    try {
+      await deleteDocument(documentJob.id);
+      const nextDocuments = await loadDocuments();
+      const nextDocument = nextDocuments.find((document) => document.id !== documentJob.id) ?? null;
+      setDocumentJob(nextDocument);
+      previousStatusRef.current = nextDocument?.status ?? null;
+      setSections([]);
+      setRules([]);
+      setGraph({ nodes: [], edges: [] });
+      setStats(null);
+      setWorkflowRefreshKey((value) => value + 1);
+      if (activeView !== "workflow") {
+        setActiveView(nextDocument ? defaultViewForStatus(nextDocument.status) : "workflow");
+      }
+      if (nextDocument && READY_STATUSES.has(nextDocument.status)) {
+        refreshDocumentData(nextDocument.id);
+      } else if (!nextDocument) {
+        setActiveView("workflow");
+      }
+      showToast("History item deleted", "success");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to delete history item");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function handleOpenDocument(documentId: number, view: "review" | "map" | "processing") {
     if (!documentId) return;
     setBusy(true);
@@ -360,6 +396,7 @@ export function App() {
       documentJob.status === "rule_extraction_failed" ||
       (documentJob.status === "rules_extracted" && (stats?.rules_extracted ?? rules.length) === 0));
   const extractButtonLabel = documentJob?.status === "markdown_ready" ? "Extract Rules" : "Retry Extract Rules";
+  const apiReady = Boolean(runtimeConfig?.mineru_configured && runtimeConfig?.llm_configured);
 
   return (
     <main className="app-shell">
@@ -369,6 +406,11 @@ export function App() {
           <h1>Rule Extraction Portal</h1>
         </div>
         <div className="topbar-actions">
+          <button className={`secondary-button setup-button ${apiReady ? "ready" : "missing"}`} type="button" onClick={() => setActiveView("config")}>
+            <Settings size={16} />
+            Settings
+            <span className="setup-dot" aria-hidden="true" />
+          </button>
           <button className="secondary-button" type="button" onClick={handleNewWork}>
             <Plus size={16} />
             New Work
@@ -389,22 +431,40 @@ export function App() {
               ))}
             </select>
           </label>
+          <button
+            aria-label="Delete selected history item"
+            className="icon-button history-delete"
+            disabled={!documentJob || busy}
+            onClick={handleDeleteCurrentHistory}
+            type="button"
+            title="Delete selected history item"
+          >
+            <Trash2 size={15} />
+          </button>
           <StatusBadge status={documentJob?.status ?? "idle"} />
         </div>
       </header>
 
-      <nav className="view-tabs" aria-label="Portal navigation">
-        {VIEWS.map((view) => (
-          <button
-            className={activeView === view ? "active" : ""}
-            key={view}
-            onClick={() => setActiveView(view)}
-            type="button"
-          >
-            {viewLabel(view)}
+      {activeView !== "workflow" ? (
+        <div className="detail-toolbar">
+          <button className="secondary-button compact" type="button" onClick={() => setActiveView("workflow")}>
+            Back to Workflow
           </button>
-        ))}
-      </nav>
+          <strong>{viewLabel(activeView)}</strong>
+        </div>
+      ) : null}
+
+      {activeView === "workflow" && runtimeConfig && !apiReady ? (
+        <div className="setup-callout">
+          <div>
+            <strong>Connect the conversion and rule extraction services first.</strong>
+            <span>API keys stay in this backend session and are not exported.</span>
+          </div>
+          <button className="primary-button compact" type="button" onClick={() => setActiveView("config")}>
+            Open Settings
+          </button>
+        </div>
+      ) : null}
 
       {documentJob ? <TopProgressBar documentJob={documentJob} stats={stats} /> : null}
 
@@ -429,7 +489,7 @@ export function App() {
 
       {activeView === "workflow" ? (
         <section className="portal-page">
-          <WorkflowWorkspace onOpenDocument={handleOpenDocument} />
+          <WorkflowWorkspace key={workflowRefreshKey} onOpenDocument={handleOpenDocument} />
         </section>
       ) : null}
 
@@ -508,7 +568,7 @@ function RuntimeConfigPanel({
     <section className="panel">
       <div className="panel-title">
         <Settings size={20} />
-        <h2>Runtime API Config</h2>
+        <h2>Service Settings</h2>
       </div>
       <div className="config-badges">
         <span className={runtimeConfig?.mineru_configured ? "configured" : "missing"}>MinerU {runtimeConfig?.mineru_configured ? "configured" : "missing"}</span>
@@ -594,7 +654,7 @@ function RuntimeConfigPanel({
           ) : (
             <Save size={18} />
           )}
-          {saved ? "Config Saved" : "Save API Config"}
+          {saved ? "Settings Saved" : "Save Settings"}
         </button>
       </form>
     </section>
@@ -706,7 +766,7 @@ function ProgressPanel({ documentJob, stats }: { documentJob: DocumentJob | null
     <section className="panel processing-hud">
       <div className="panel-title">
         {isActive ? <Loader2 className="spin" size={20} /> : <SearchCheck size={20} />}
-        <h2>Processing</h2>
+        <h2>Progress</h2>
         {isActive ? <span className="live-dot" /> : null}
       </div>
 
@@ -1077,7 +1137,7 @@ function RuleMap({
     <section className="panel tall-panel">
       <div className="panel-title">
         <GitBranch size={20} />
-        <h2>Rule Logic Review</h2>
+        <h2>Rule Logic</h2>
       </div>
       <div className="filter-row">
         {(["all", ...allRuleTypes, "low", "reviewed"] as const).map((item) => {
@@ -1650,7 +1710,21 @@ function ExportPanel({ documentId, kinds }: { documentId: number; kinds: string[
 }
 
 function labelStatus(status: string) {
-  return status.replaceAll("_", " ");
+  const labels: Record<string, string> = {
+    idle: "idle",
+    created: "created",
+    mineru_queued: "PDF queued",
+    mineru_processing: "converting PDF",
+    markdown_ready: "text ready",
+    rule_extraction_queued: "extracting rules",
+    extracting_rules: "extracting rules",
+    rules_extracted: "rules extracted",
+    rule_extraction_failed: "rule extraction failed",
+    mineru_failed: "PDF conversion failed",
+    evidence_extracted: "evidence extracted",
+    checked: "checked",
+  };
+  return labels[status] ?? status.replaceAll("_", " ");
 }
 
 function defaultViewForStatus(status: string): View {
@@ -1663,10 +1737,10 @@ function defaultViewForStatus(status: string): View {
 function viewLabel(view: View) {
   const labels: Record<View, string> = {
     workflow: "Workflow",
-    processing: "Processing",
+    processing: "Progress",
     review: "Document Review",
-    map: "Rule Logic Review",
-    config: "API Config"
+    map: "Rule Logic",
+    config: "Settings"
   };
   return labels[view];
 }

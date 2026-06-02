@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-from backend.app import models, schemas
+from backend.app import main, models, schemas
 from backend.app.database import Base
 from backend.app.routers import workflow
 from backend.app.services.llm import LLMClient
@@ -160,6 +160,103 @@ def test_rulebook_verify_marks_extracted_rules_reviewed(db: Session):
 
     assert response["rules_reviewed"] == 1
     assert rule.review_status == "reviewed"
+
+
+def test_delete_document_removes_history_and_linked_workflow_records(db: Session):
+    collection = workflow.create_collection(schemas.CollectionCreate(name="Delete History"), db)
+    source_doc = workflow.create_source_document(
+        schemas.SourceDocumentCreate(
+            collection_id=collection.id,
+            doc_type="rulebook",
+            name="Practice Notes",
+            linked_document_id=101,
+        ),
+        db,
+    )
+    field = models.TemplateField(
+        id="tf-delete-history",
+        collection_id=collection.id,
+        source_document_id=source_doc.id,
+        template_doc="CDP1",
+        field_key="cdp1.main_option",
+        label="Selected main Option",
+        anchor_text="main Option",
+        input_type="enum",
+        extraction_hint="Extract selected main Option.",
+        review_status="approved",
+    )
+    db.add(field)
+    db.add(
+        models.FieldRuleMapping(
+            id="frm-delete-history",
+            collection_id=collection.id,
+            template_field_id=field.id,
+            rule_id="rule-main-option",
+            source_type="rule",
+            check_type="deterministic",
+            confidence=0.9,
+            rationale="test",
+            review_status="suggested",
+        )
+    )
+    db.commit()
+
+    response = main.delete_document(101, db)
+
+    assert response == {"deleted": True}
+    assert db.query(models.Document).filter(models.Document.id == 101).count() == 0
+    assert db.query(models.Section).filter(models.Section.document_id == 101).count() == 0
+    assert db.query(models.Rule).filter(models.Rule.document_id == 101).count() == 0
+    assert db.query(models.SourceDocument).filter(models.SourceDocument.linked_document_id == 101).count() == 0
+    assert db.query(models.FieldRuleMapping).filter(models.FieldRuleMapping.id == "frm-delete-history").count() == 0
+
+
+def test_delete_source_document_removes_linked_history_document(db: Session):
+    collection = workflow.create_collection(schemas.CollectionCreate(name="Delete Source"), db)
+    source_doc = workflow.create_source_document(
+        schemas.SourceDocumentCreate(
+            collection_id=collection.id,
+            doc_type="rulebook",
+            name="Practice Notes",
+            linked_document_id=101,
+        ),
+        db,
+    )
+    field = models.TemplateField(
+        id="tf-delete-source",
+        collection_id=collection.id,
+        source_document_id=None,
+        template_doc="CDP1",
+        field_key="cdp1.main_option",
+        label="Selected main Option",
+        anchor_text="main Option",
+        input_type="enum",
+        extraction_hint="Extract selected main Option.",
+        review_status="approved",
+    )
+    db.add(field)
+    db.add(
+        models.FieldRuleMapping(
+            id="frm-delete-source",
+            collection_id=collection.id,
+            template_field_id=field.id,
+            rule_id="rule-main-option",
+            source_type="rule",
+            check_type="deterministic",
+            confidence=0.9,
+            rationale="test",
+            review_status="suggested",
+        )
+    )
+    db.commit()
+
+    response = workflow.delete_source_document(source_doc.id, db)
+
+    assert response == {"deleted": True}
+    assert db.query(models.SourceDocument).filter(models.SourceDocument.id == source_doc.id).count() == 0
+    assert db.query(models.Document).filter(models.Document.id == 101).count() == 0
+    assert db.query(models.Rule).filter(models.Rule.document_id == 101).count() == 0
+    assert db.query(models.FieldRuleMapping).filter(models.FieldRuleMapping.id == "frm-delete-source").count() == 0
 
 
 def test_collection_delete_cascades_workflow_records(db: Session):

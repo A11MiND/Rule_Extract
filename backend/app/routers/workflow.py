@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import uuid
+import shutil
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
+from ..config import settings
 from ..database import get_db
 from ..runtime_config import get_runtime_config
 from ..services.llm_check import evaluate_result
@@ -74,8 +76,37 @@ def list_source_documents(
 @router.delete("/source-documents/{source_document_id}")
 def delete_source_document(source_document_id: str, db: Session = Depends(get_db)):
     source = require_source_document(db, source_document_id)
+    linked_document_id = source.linked_document_id
+    linked_document = (
+        db.query(models.Document).filter(models.Document.id == linked_document_id).first()
+        if linked_document_id
+        else None
+    )
+    source_count_for_linked_document = (
+        db.query(models.SourceDocument)
+        .filter(
+            models.SourceDocument.linked_document_id == linked_document_id,
+            models.SourceDocument.id != source.id,
+        )
+        .count()
+        if linked_document_id
+        else 0
+    )
+
+    document_dir = None
+    if linked_document and source_count_for_linked_document == 0:
+        rule_ids = [rule.id for rule in linked_document.rules]
+        if rule_ids:
+            db.query(models.FieldRuleMapping).filter(models.FieldRuleMapping.rule_id.in_(rule_ids)).delete(
+                synchronize_session=False
+            )
+        document_dir = settings.storage_root / "documents" / str(linked_document.id)
+        db.delete(linked_document)
+
     db.delete(source)
     db.commit()
+    if document_dir and document_dir.exists():
+        shutil.rmtree(document_dir, ignore_errors=True)
     return {"deleted": True}
 
 

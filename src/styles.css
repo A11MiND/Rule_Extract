@@ -118,6 +118,63 @@ textarea {
   justify-content: flex-end;
 }
 
+.setup-button {
+  position: relative;
+}
+
+.setup-dot {
+  border-radius: 999px;
+  display: inline-block;
+  height: 8px;
+  margin-left: 2px;
+  width: 8px;
+}
+
+.setup-button.ready .setup-dot {
+  background: #16803c;
+}
+
+.setup-button.missing .setup-dot {
+  background: #d8562a;
+}
+
+.detail-toolbar,
+.setup-callout {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid var(--hkpc-line);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 10px 12px;
+}
+
+.detail-toolbar strong {
+  color: var(--hkpc-blue-dark);
+  font-size: 15px;
+}
+
+.setup-callout {
+  background: #eef7ff;
+}
+
+.setup-callout strong,
+.setup-callout span {
+  display: block;
+}
+
+.setup-callout strong {
+  color: var(--hkpc-blue-dark);
+  margin-bottom: 2px;
+}
+
+.setup-callout span {
+  color: #486075;
+  font-size: 13px;
+}
+
 .eyebrow {
   color: var(--hkpc-blue);
   font-size: 13px;
@@ -2240,12 +2297,27 @@ label {
   display: flex;
   gap: 18px;
   justify-content: space-between;
+  background: #fff;
+  border: 1px solid #b9d8f2;
+  border-radius: 8px;
+  padding: 18px;
 }
 
 .workflow-header h2 {
   color: #101820;
-  font-size: 28px;
+  font-size: 24px;
   margin: 0;
+}
+
+.workspace-chip {
+  background: #eef7ff;
+  border: 1px solid #b9d8f2;
+  border-radius: 999px;
+  color: #003b70;
+  font-size: 13px;
+  font-weight: 800;
+  padding: 8px 12px;
+  white-space: nowrap;
 }
 
 .workflow-select {
@@ -2408,6 +2480,13 @@ label {
   color: #61758a;
   line-height: 1.5;
   margin: 0;
+}
+
+.anchor-snippet {
+  color: #486178;
+  display: block;
+  line-height: 1.45;
+  max-width: 720px;
 }
 
 .checkbox-stack {
@@ -2602,6 +2681,207 @@ label {
   padding: 9px 11px;
 }
 
+.asset-workbench {
+  gap: 16px;
+}
+
+.asset-header {
+  align-items: center;
+}
+
+.asset-header p:not(.eyebrow) {
+  color: #486178;
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 6px 0 0;
+  max-width: 860px;
+}
+
+.asset-summary-grid,
+.asset-state-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.asset-state-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 14px 0;
+}
+
+.metric-card {
+  background: #eef7ff;
+  border: 1px solid #b9d8f2;
+  border-radius: 8px;
+  color: #486178;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 86px;
+  padding: 12px;
+}
+
+.metric-card small {
+  color: #55708a;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.metric-card strong {
+  color: #003b70;
+  font-size: 23px;
+  line-height: 1.1;
+}
+
+.metric-card em {
+  color: #61758a;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.asset-layout {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(360px, 0.85fr) minmax(520px, 1.15fr);
+}
+
+.asset-slot-group + .asset-slot-group {
+  border-top: 1px solid #e2edf7;
+  margin-top: 16px;
+  padding-top: 16px;
+}
+
+.asset-slot-group h4 {
+  color: #003b70;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  margin: 0 0 10px;
+  text-transform: uppercase;
+}
+
+.asset-slot-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.asset-slot {
+  align-items: stretch;
+  background: #f8fbff;
+  border: 1px solid #d7e8f7;
+  border-radius: 8px;
+  color: #101820;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  justify-content: flex-start;
+  min-height: 86px;
+  padding: 11px;
+  text-align: left;
+  width: 100%;
+}
+
+.asset-slot:hover:not(:disabled) {
+  background: #eef7ff;
+  border-color: #8fc4ee;
+}
+
+.asset-slot.active {
+  background: #e6f6fc;
+  border-color: #005bac;
+  box-shadow: inset 4px 0 0 #005bac;
+}
+
+.asset-slot strong {
+  color: #003b70;
+  font-size: 16px;
+}
+
+.asset-slot span {
+  color: #61758a;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.asset-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.asset-detail-heading {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.asset-detail-heading strong {
+  color: #101820;
+  display: block;
+  font-size: 19px;
+}
+
+.asset-detail-heading span {
+  color: #61758a;
+  display: block;
+  font-size: 13px;
+  line-height: 1.45;
+  margin-top: 4px;
+}
+
+.asset-import-form {
+  grid-template-columns: minmax(0, 1fr) auto;
+  margin: 4px 0;
+}
+
+.asset-status {
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  padding: 6px 10px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.asset-status.empty {
+  background: #f5f8fb;
+  border: 1px solid #cbddec;
+  color: #61758a;
+}
+
+.asset-status.running {
+  background: #e8f4ff;
+  border: 1px solid #9fc9ec;
+  color: #003b70;
+}
+
+.asset-status.ready {
+  background: #e8f7ef;
+  border: 1px solid #9bd3b1;
+  color: #166534;
+}
+
+.asset-status.failed {
+  background: #fde8e3;
+  border: 1px solid #efb5a7;
+  color: #8a2d1f;
+}
+
+.source-error {
+  background: #fff2ef;
+  border: 1px solid #f0c4b8;
+  border-radius: 8px;
+  color: #8a2d1f;
+  margin: 0;
+  padding: 10px 12px;
+}
+
 .source-list {
   display: grid;
   gap: 10px;
@@ -2636,6 +2916,28 @@ label {
   color: #9f3412;
 }
 
+.queue-list {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.queue-row-main {
+  align-items: flex-start;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  display: block;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.queue-row-main:hover:not(:disabled) {
+  background: transparent;
+  border-color: transparent;
+}
+
 .workflow-card-toolbar,
 .mapping-intro {
   align-items: start;
@@ -2656,15 +2958,23 @@ label {
 @media (max-width: 1000px) {
   .workflow-hero,
   .workflow-two-column,
+  .asset-layout,
+  .asset-summary-grid,
+  .asset-state-grid,
   .flow-rail {
     grid-template-columns: 1fr;
   }
 
   .workflow-card-toolbar,
   .mapping-intro,
+  .asset-detail-heading,
   .source-row {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .asset-import-form {
+    grid-template-columns: 1fr;
   }
 }
 

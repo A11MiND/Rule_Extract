@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -95,6 +96,41 @@ def list_documents(db: Session = Depends(get_db)) -> list[models.Document]:
 @app.get("/api/documents/{document_id}", response_model=schemas.DocumentRead)
 def get_document(document_id: int, db: Session = Depends(get_db)) -> models.Document:
     return require_document(db, document_id)
+
+
+@app.delete("/api/documents/{document_id}")
+def delete_document(document_id: int, db: Session = Depends(get_db)) -> dict[str, bool]:
+    document = require_document(db, document_id)
+    linked_sources = (
+        db.query(models.SourceDocument)
+        .filter(models.SourceDocument.linked_document_id == document.id)
+        .all()
+    )
+    rule_ids = [rule.id for rule in document.rules]
+    source_ids = [source.id for source in linked_sources]
+    if rule_ids:
+        (
+            db.query(models.FieldRuleMapping)
+            .filter(models.FieldRuleMapping.rule_id.in_(rule_ids))
+            .delete(synchronize_session=False)
+        )
+    if source_ids:
+        db.query(models.TenderFieldEvidence).filter(
+            models.TenderFieldEvidence.source_document.in_(source_ids)
+        ).delete(synchronize_session=False)
+        for submission in db.query(models.TenderSubmission).all():
+            next_ids = [source_id for source_id in submission.source_document_ids if source_id not in source_ids]
+            if next_ids != submission.source_document_ids:
+                submission.source_document_ids = next_ids
+        for source in linked_sources:
+            db.delete(source)
+    db.delete(document)
+    db.commit()
+
+    document_dir = settings.storage_root / "documents" / str(document_id)
+    if document_dir.exists():
+        shutil.rmtree(document_dir, ignore_errors=True)
+    return {"deleted": True}
 
 
 @app.get("/api/documents/{document_id}/outline", response_model=list[schemas.SectionRead])
