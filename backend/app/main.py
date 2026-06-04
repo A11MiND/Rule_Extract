@@ -9,6 +9,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import logging
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +36,10 @@ from .runtime_config import (
     update_runtime_config,
 )
 
+logger = logging.getLogger(__name__)
+documents_storage_root = (settings.storage_root / "documents").resolve()
+documents_storage_root.mkdir(parents=True, exist_ok=True)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -55,7 +60,7 @@ app = FastAPI(
     description="Document conversion, human review, rule/field extraction, mapping, and procedure-set APIs.",
     lifespan=lifespan,
 )
-app.mount("/storage", StaticFiles(directory=settings.storage_root), name="storage")
+app.mount("/storage/documents", StaticFiles(directory=documents_storage_root), name="document-storage")
 
 app.include_router(workflow.router)
 
@@ -269,7 +274,7 @@ def get_source_pdf(document_id: int, download: bool = False, db: Session = Depen
         candidates.append(Path(str(manifest["source_pdf_path"])))
     candidates.extend(Path(path) for path in manifest.get("files", []) if str(path).lower().endswith(".pdf"))
     for path in candidates:
-        if path.exists():
+        if is_document_artifact_path(path, document_id) and path.exists():
             return FileResponse(
                 path,
                 media_type="application/pdf",
@@ -296,6 +301,8 @@ def get_document_page_preview(document_id: int, page: int, db: Session = Depends
         if not raw_source_path:
             raise HTTPException(status_code=404, detail="Source PDF is not cached yet.")
         source_path = Path(str(raw_source_path))
+        if not is_document_artifact_path(source_path, document_id):
+            raise HTTPException(status_code=404, detail="Source PDF is not cached yet.")
         if not source_path.exists():
             raise HTTPException(status_code=404, detail="Source PDF is not cached yet.")
         try:
@@ -323,8 +330,9 @@ def get_document_page_preview(document_id: int, page: int, db: Session = Depends
                 raise HTTPException(status_code=501, detail="PDF preview generation requires PyMuPDF.")
         except HTTPException:
             raise
-        except Exception as exc:
-            raise HTTPException(status_code=501, detail=f"PDF preview generation is unavailable: {exc}") from exc
+        except Exception:
+            logger.exception("PDF preview generation failed for document %s page %s", document_id, page)
+            raise HTTPException(status_code=501, detail="PDF preview generation is unavailable.")
     return FileResponse(preview_path, media_type="image/png")
 
 
@@ -544,7 +552,7 @@ def export_markdown(document_id: int, db: Session = Depends(get_db)) -> PlainTex
 def export_llm_windows(document_id: int, db: Session = Depends(get_db)) -> Response:
     document = require_document(db, document_id)
     path = document.artifact_manifest.get("llm_windows_path")
-    if path and Path(path).exists():
+    if path and is_document_artifact_path(Path(path), document_id) and Path(path).exists():
         return FileResponse(
             path,
             media_type="application/x-ndjson",
@@ -777,7 +785,7 @@ def persist_sections_from_artifacts(
     manifest: dict,
 ) -> None:
     db.query(models.Section).filter(models.Section.document_id == document.id).delete()
-    parsed_sections = parse_sections_from_manifest(manifest) or parse_markdown_sections(markdown)
+    parsed_sections = parse_sections_from_manifest(manifest, document.id) or parse_markdown_sections(markdown)
     for section in parsed_sections:
         db.add(
             models.Section(
@@ -798,17 +806,26 @@ def scoped_section_id(document_id: int, section_id: str) -> str:
     return section_id if section_id.startswith(prefix) else f"{prefix}{section_id}"
 
 
+def is_document_artifact_path(path: Path, document_id: int) -> bool:
+    try:
+        path.resolve().relative_to((documents_storage_root / str(document_id)).resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def persist_sections_from_markdown(db: Session, document: models.Document, markdown: str) -> None:
     persist_sections_from_artifacts(db, document, markdown=markdown, manifest={})
 
 
-def parse_sections_from_manifest(manifest: dict) -> list | None:
+def parse_sections_from_manifest(manifest: dict, document_id: int) -> list | None:
     json_paths = manifest.get("json_paths") or []
     content_list_paths = [
         Path(path)
         for path in json_paths
         if Path(path).name.endswith("_content_list.json")
         and not Path(path).name.endswith("_content_list_v2.json")
+        and is_document_artifact_path(Path(path), document_id)
     ]
     for path in content_list_paths:
         if path.exists():
