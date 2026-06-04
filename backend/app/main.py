@@ -383,10 +383,11 @@ def patch_section(
             .all()
         )
         for descendant in descendants:
+            if descendant.level <= section.level:
+                break
             path = list(descendant.heading_path or [])
-            try:
-                index = path.index(old_title)
-            except ValueError:
+            index = section.level - 1
+            if index < 0 or index >= len(path) or path[index] != old_title:
                 continue
             path[index] = section.title
             descendant.heading_path = path
@@ -429,6 +430,8 @@ def extract_document_rules(
         raise HTTPException(status_code=409, detail="Document has no Markdown sections to extract from.")
     if not effective_llm_key():
         raise HTTPException(status_code=409, detail="LLM API key is required before extracting rules.")
+    if document.status in {"rule_extraction_queued", "extracting_rules"}:
+        raise HTTPException(status_code=409, detail="Rule extraction is already running for this document.")
     document.status = "rule_extraction_queued"
     document.error_message = None
     db.commit()
@@ -768,6 +771,7 @@ def run_rule_extraction_pipeline(document_id: int) -> None:
         )
         db.commit()
     except (LLMError, Exception) as exc:
+        db.rollback()
         document = db.query(models.Document).filter(models.Document.id == document_id).first()
         if document:
             document.status = "rule_extraction_failed"
@@ -796,11 +800,10 @@ def persist_sections_from_artifacts(
                 title=section.title,
                 heading_path=section.heading_path,
                 content=section.content,
+                page_range=getattr(section, "page_range", None),
+                coordinates=getattr(section, "coordinates", []) or [],
             )
         )
-    db.commit()
-
-
 def scoped_section_id(document_id: int, section_id: str) -> str:
     prefix = f"doc-{document_id}-"
     return section_id if section_id.startswith(prefix) else f"{prefix}{section_id}"
@@ -875,9 +878,10 @@ def compute_document_stats(document: models.Document) -> schemas.DocumentStats:
         if rule.type == "option" or rule.options:
             option_rules += 1
     sections_with_content = sum(1 for s in sections if s.content.strip())
+    classified_sections = sum(1 for s in sections if s.classification)
     return schemas.DocumentStats(
         total_sections=len(sections),
-        classified_sections=sections_with_content,
+        classified_sections=classified_sections,
         candidate_sections=sections_with_content,
         llm_windows_completed=int(manifest.get("llm_windows_completed") or 0),
         llm_windows_total=int(manifest.get("llm_windows_total") or 0),

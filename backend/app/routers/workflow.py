@@ -234,6 +234,20 @@ def delete_source_document(source_document_id: str, db: Session = Depends(get_db
     )
 
     document_dir = None
+    field_ids = [
+        field_id
+        for (field_id,) in db.query(models.TemplateField.id)
+        .filter(models.TemplateField.source_document_id == source.id)
+        .all()
+    ]
+    if field_ids:
+        db.query(models.TenderFieldEvidence).filter(
+            models.TenderFieldEvidence.template_field_id.in_(field_ids)
+        ).delete(synchronize_session=False)
+    for submission in db.query(models.TenderSubmission).all():
+        next_ids = [item for item in submission.source_document_ids if item != source.id]
+        if next_ids != submission.source_document_ids:
+            submission.source_document_ids = next_ids
     if linked_document and source_count_for_linked_document == 0:
         rule_ids = [rule.id for rule in linked_document.rules]
         if rule_ids:
@@ -267,7 +281,10 @@ def verify_source_document(source_document_id: str, db: Session = Depends(get_db
             raise HTTPException(status_code=409, detail="Rule book is not linked to a parsed document.")
         updated = (
             db.query(models.Rule)
-            .filter(models.Rule.document_id == source.linked_document_id)
+            .filter(
+                models.Rule.document_id == source.linked_document_id,
+                models.Rule.review_status != "rejected",
+            )
             .update({"review_status": "reviewed"}, synchronize_session=False)
         )
         source.status = "rules_verified"

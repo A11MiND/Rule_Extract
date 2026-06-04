@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Generator
+import logging
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from .config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -20,6 +23,16 @@ else:
     _kwargs["pool_pre_ping"] = True
 
 engine = create_engine(settings.database_url, connect_args=_connect_args, **_kwargs)
+if settings.database_url.startswith("sqlite"):
+    @event.listens_for(engine, "connect")
+    def configure_sqlite(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.execute("PRAGMA journal_mode=WAL")
+        finally:
+            cursor.close()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
@@ -40,6 +53,7 @@ def init_db() -> None:
     if settings.database_url.startswith("sqlite"):
         import sqlite3
         db_path = settings.database_url.replace("sqlite:///", "")
+        conn = None
         try:
             conn = sqlite3.connect(db_path)
             upgrades = {
@@ -83,6 +97,8 @@ def init_db() -> None:
                     if existing and name not in existing:
                         conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}')
             conn.commit()
-            conn.close()
         except Exception:
-            pass
+            logger.exception("Failed to apply non-destructive SQLite compatibility upgrades")
+        finally:
+            if conn is not None:
+                conn.close()

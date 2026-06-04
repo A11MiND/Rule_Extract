@@ -154,18 +154,15 @@ def extract_rules(
     all_sections_by_id = {s.id: s for s in sections}
     definitions = gather_definitions(sections)
 
-    db.query(models.Rule).filter(models.Rule.document_id == document.id).delete()
-    db.commit()
-
     # Flatten all (window, batch) pairs into a single job list
-    jobs: list[tuple[int, ExtractionWindow, list[models.Section], str]] = []
+    jobs: list[tuple[int, str, list[dict[str, Any]], str, list[models.Section]]] = []
     for window in windows:
         chapter_context = build_chapter_context(
             window, definitions, cross_ref_map, all_sections_by_id, document.id,
         )
         batches = chunked(window.sections, WINDOW_BATCH_SIZE)
         for batch in batches:
-            jobs.append((len(jobs) + 1, window, batch, chapter_context))
+            jobs.append((len(jobs) + 1, window.title, [section_snapshot(section) for section in batch], chapter_context, batch))
 
     total_batches = len(jobs)
     manifest = dict(document.artifact_manifest or {})
@@ -185,13 +182,13 @@ def extract_rules(
         futures = {
             executor.submit(
                 extract_rules_from_batch,
-                llm, prompt, window, batch, chapter_context, idx,
+                llm, prompt, window_title, snapshots, chapter_context, idx,
             ): idx
-            for idx, window, batch, chapter_context in jobs
+            for idx, window_title, snapshots, chapter_context, _batch in jobs
         }
         for future in as_completed(futures):
             idx = futures[future]
-            _, window, batch, _ = jobs[idx - 1]
+            _, window_title, _, _, batch = jobs[idx - 1]
             section_by_id = {s.id: s for s in batch}
             try:
                 result, entry = future.result()
@@ -199,7 +196,7 @@ def extract_rules(
                 entry = {
                     "kind": "extraction",
                     "batch_index": idx,
-                    "window_title": window.title,
+                    "window_title": window_title,
                     "section_ids": [s.id for s in batch],
                     "status": "failed",
                     "error": str(exc),
@@ -216,7 +213,7 @@ def extract_rules(
 
             rules_in_result = len(result.get("rules", []))
             if rules_in_result:
-                print(f"Batch {idx} ({window.title}): got {rules_in_result} rules from {len(batch)} sections", flush=True)
+                print(f"Batch {idx} ({window_title}): got {rules_in_result} rules from {len(batch)} sections", flush=True)
 
             for raw in result.get("rules", []):
                 if not isinstance(raw, dict):
@@ -274,12 +271,20 @@ def extract_rules(
             if saved_count > 0:
                 db.commit()
 
+    failures = int(manifest.get("llm_window_failures", 0))
+    if failures == 0:
+        stale_rules = db.query(models.Rule).filter(
+            models.Rule.document_id == document.id,
+            models.Rule.review_status == "draft",
+        )
+        if seen_ids:
+            stale_rules = stale_rules.filter(~models.Rule.id.in_(seen_ids))
+        stale_rules.delete(synchronize_session=False)
     db.commit()
     print(f"SAVED {saved_count} rules total", flush=True)
     db_rules = db.query(models.Rule).filter(models.Rule.document_id == document.id).count()
     print(f"DB has {db_rules} rules for document {document.id}", flush=True)
 
-    failures = int(manifest.get("llm_window_failures", 0))
     total = int(manifest.get("llm_windows_total", total_batches))
     if saved_count == 0 and failures:
         document.status = "rule_extraction_failed"
@@ -443,15 +448,15 @@ def build_chapter_context(
 
 
 def build_batch_extraction_prompt(
-    batch: list[models.Section],
+    batch: list[dict[str, Any]],
     chapter_context: str,
 ) -> str:
     """Build prompt for a batch of sections within a chapter."""
     sections_text = "\n\n---\n\n".join(
         (
-            f"SECTION_ID: {s.id}\n"
-            f"HEADING_PATH: {' > '.join(s.heading_path)}\n"
-            f"TEXT:\n{s.content}"
+            f"SECTION_ID: {s['id']}\n"
+            f"HEADING_PATH: {' > '.join(s['heading_path'])}\n"
+            f"TEXT:\n{s['content']}"
         )
         for s in batch
     )
@@ -469,8 +474,8 @@ def build_batch_extraction_prompt(
 def extract_rules_from_batch(
     llm: LLMClient,
     system_prompt: str,
-    window: ExtractionWindow,
-    batch: list[models.Section],
+    window_title: str,
+    batch: list[dict[str, Any]],
     chapter_context: str,
     batch_index: int,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -480,13 +485,23 @@ def extract_rules_from_batch(
     entry = {
         "kind": "extraction",
         "batch_index": batch_index,
-        "window_title": window.title,
-        "section_ids": [s.id for s in batch],
+        "window_title": window_title,
+        "section_ids": [s["id"] for s in batch],
         "prompt": prompt,
         "response": result,
         "status": "completed",
     }
     return result, entry
+
+
+def section_snapshot(section: models.Section) -> dict[str, Any]:
+    """Copy the values workers need so SQLAlchemy objects never cross threads."""
+    return {
+        "id": section.id,
+        "title": section.title,
+        "content": section.content,
+        "heading_path": list(section.heading_path or []),
+    }
 
 
 def append_llm_window_log(document_id: int, entry: dict[str, Any]) -> None:
@@ -667,6 +682,21 @@ def save_rule_if_new(db: Session, document: models.Document, raw: dict[str, Any]
     rule_id = f"rule-{document.id}-{fingerprint[:12]}"
     existing = db.query(models.Rule).filter(models.Rule.id == rule_id).first()
     if existing:
+        if existing.review_status not in {"reviewed", "rejected"}:
+            existing.section_id = raw.get("section_id")
+            existing.source = validated.source.model_dump()
+            existing.subject = validated.subject
+            existing.condition = validated.condition
+            existing.action = validated.action
+            existing.type = validated.type
+            existing.actor = validated.actor
+            existing.target = validated.target
+            existing.deadline = validated.deadline
+            existing.options = [option.model_dump() for option in validated.options]
+            existing.dependencies = [dependency.model_dump() for dependency in validated.dependencies]
+            existing.next_rule_ids = validated.next_rule_ids
+            existing.confidence = validated.confidence
+            existing.notes = validated.notes
         return 0
     db.add(
         models.Rule(

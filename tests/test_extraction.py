@@ -1,9 +1,21 @@
 import json
 from types import SimpleNamespace
 
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from backend.app import models
 from backend.app.config import settings
+from backend.app.database import Base
 from backend.app.schemas import RuleBase
-from backend.app.services.extraction import append_llm_window_log, llm_windows_path, normalize_rule
+from backend.app.services.extraction import (
+    append_llm_window_log,
+    llm_windows_path,
+    normalize_rule,
+    save_rule_if_new_batch,
+    section_snapshot,
+)
 
 
 def test_append_llm_window_log_writes_jsonl_with_path_storage(tmp_path):
@@ -50,3 +62,62 @@ def test_normalize_rule_accepts_list_action_from_llm():
     assert validated.action == "Stipulate Hong Kong Dollar; Do not include irrelevant secondary option"
     assert validated.condition == ""
     assert validated.source.coordinates == []
+
+
+def test_save_rule_batch_preserves_human_reviewed_rule():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(bind=engine)
+    db = sessionmaker(bind=engine)()
+    document = models.Document(id=1, name="Rules", pdf_url="https://example.test/rules.pdf")
+    existing = models.Rule(
+        id="rule-1-fixed",
+        document_id=1,
+        subject="Human reviewed subject",
+        action="Human reviewed action",
+        review_status="reviewed",
+    )
+    db.add_all([document, existing])
+    db.commit()
+
+    created = save_rule_if_new_batch(
+        db,
+        document,
+        {
+            "source": {},
+            "document_id": 1,
+            "section_id": None,
+            "subject": "LLM replacement",
+            "condition": "",
+            "action": "LLM replacement",
+            "type": "obligation",
+            "review_status": "draft",
+            "confidence": 0.8,
+            "notes": "",
+            "options": [],
+            "dependencies": [],
+            "next_rule_ids": [],
+        },
+        rule_id="rule-1-fixed",
+    )
+    db.commit()
+    db.refresh(existing)
+
+    assert created == 0
+    assert existing.subject == "Human reviewed subject"
+    assert existing.review_status == "reviewed"
+
+
+def test_section_snapshot_contains_only_plain_values():
+    section = SimpleNamespace(
+        id="section-1",
+        title="Title",
+        content="Content",
+        heading_path=["Part", "Title"],
+    )
+
+    assert section_snapshot(section) == {
+        "id": "section-1",
+        "title": "Title",
+        "content": "Content",
+        "heading_path": ["Part", "Title"],
+    }

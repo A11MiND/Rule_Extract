@@ -214,6 +214,28 @@ def test_rulebook_verify_marks_extracted_rules_reviewed(db: Session):
     assert rule.review_status == "reviewed"
 
 
+def test_rulebook_verify_preserves_rejected_rules(db: Session):
+    collection = workflow.create_collection(schemas.CollectionCreate(name="Rule Verify Rejects"), db)
+    source_doc = workflow.create_source_document(
+        schemas.SourceDocumentCreate(
+            collection_id=collection.id,
+            doc_type="rulebook",
+            name="Practice Notes",
+            linked_document_id=101,
+        ),
+        db,
+    )
+    rule = db.query(models.Rule).filter(models.Rule.id == "rule-main-option").first()
+    rule.review_status = "rejected"
+    db.commit()
+
+    response = workflow.verify_source_document(source_doc.id, db)
+    db.refresh(rule)
+
+    assert response["rules_reviewed"] == 0
+    assert rule.review_status == "rejected"
+
+
 def test_document_markers_follow_source_document_role(db: Session):
     collection = workflow.create_collection(schemas.CollectionCreate(name="Marker Roles"), db)
     template_source = workflow.create_source_document(
@@ -339,6 +361,48 @@ def test_delete_source_document_removes_linked_history_document(db: Session):
     assert db.query(models.Document).filter(models.Document.id == 101).count() == 0
     assert db.query(models.Rule).filter(models.Rule.document_id == 101).count() == 0
     assert db.query(models.FieldRuleMapping).filter(models.FieldRuleMapping.id == "frm-delete-source").count() == 0
+
+
+def test_delete_source_document_removes_submission_reference_and_field_evidence(db: Session):
+    collection = workflow.create_collection(schemas.CollectionCreate(name="Delete Source References"), db)
+    source_doc = workflow.create_source_document(
+        schemas.SourceDocumentCreate(collection_id=collection.id, doc_type="template", name="CDP1"),
+        db,
+    )
+    field = models.TemplateField(
+        id="tf-delete-evidence",
+        collection_id=collection.id,
+        source_document_id=source_doc.id,
+        template_doc="CDP1",
+        field_key="cdp1.delete",
+        label="Delete me",
+        anchor_text="delete",
+        input_type="text",
+        extraction_hint="delete",
+    )
+    submission = models.TenderSubmission(
+        id="sub-delete-source",
+        collection_id=collection.id,
+        name="Submission",
+        source_document_ids=[source_doc.id],
+    )
+    db.add_all([field, submission])
+    db.flush()
+    db.add(
+        models.TenderFieldEvidence(
+            id="ev-delete-source",
+            submission_id=submission.id,
+            template_field_id=field.id,
+            source_document=source_doc.id,
+        )
+    )
+    db.commit()
+
+    workflow.delete_source_document(source_doc.id, db)
+    db.refresh(submission)
+
+    assert submission.source_document_ids == []
+    assert db.query(models.TenderFieldEvidence).filter(models.TenderFieldEvidence.id == "ev-delete-source").count() == 0
 
 
 def test_collection_delete_cascades_workflow_records(db: Session):
