@@ -4,6 +4,9 @@ import csv
 import io
 import json
 import shutil
+import subprocess
+import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -19,8 +22,10 @@ from .database import SessionLocal, get_db, init_db
 from .services.artifacts import download_source_pdf, extract_zip, write_zip
 from .services.extraction import extract_rules
 from .services.llm import LLMClient, LLMError
+from .services.markers import find_document_markers
 from .services.markdown import build_section_tree, parse_markdown_sections, parse_mineru_content_sections
 from .services.mineru import MinerUClient, MinerUError
+from .services.audit import model_snapshot, record_audit
 from .routers import workflow
 from .runtime_config import (
     effective_llm_key,
@@ -31,7 +36,25 @@ from .runtime_config import (
 )
 
 
-app = FastAPI(title="NEC Rule Extraction Demo")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    db = SessionLocal()
+    try:
+        for collection in db.query(models.DocumentCollection).all():
+            workflow.seed_library_slots(db, collection.id)
+        db.commit()
+    finally:
+        db.close()
+    yield
+
+
+app = FastAPI(
+    title="Tender Vetting API",
+    version="0.2.0",
+    description="Document conversion, human review, rule/field extraction, mapping, and procedure-set APIs.",
+    lifespan=lifespan,
+)
 app.mount("/storage", StaticFiles(directory=settings.storage_root), name="storage")
 
 app.include_router(workflow.router)
@@ -43,11 +66,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-@app.on_event("startup")
-def on_startup() -> None:
-    init_db()
 
 
 @app.get("/api/health")
@@ -82,10 +100,66 @@ def create_document(
         status="mineru_queued",
     )
     db.add(document)
+    record_audit(
+        db,
+        action="create",
+        entity_type="document",
+        entity_id="pending",
+        summary=f"Queued document conversion for {document.name}",
+        after={"name": document.name, "pdf_url": document.pdf_url, "status": document.status},
+    )
     db.commit()
     db.refresh(document)
     background_tasks.add_task(run_mineru_pipeline, document.id)
     return document
+
+
+@app.post("/api/source-documents/import-url", response_model=schemas.SourceDocumentRead, tags=["workflow"])
+def import_source_document_url(
+    payload: schemas.SourceImportUrl,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    if not effective_mineru_token():
+        raise HTTPException(status_code=409, detail="MinerU API token is required before importing a PDF.")
+    workflow.require_collection(db, payload.collection_id)
+    if payload.slot_id:
+        workflow.require_library_slot(db, payload.slot_id)
+    document = models.Document(
+        name=payload.name,
+        pdf_url=str(payload.pdf_url),
+        contract_family="Generic",
+        grouping_level=payload.grouping_level,
+        status="mineru_queued",
+    )
+    db.add(document)
+    db.flush()
+    source = models.SourceDocument(
+        id=f"src-{uuid.uuid4().hex[:10]}",
+        collection_id=payload.collection_id,
+        slot_id=payload.slot_id,
+        doc_type=payload.doc_type,
+        name=payload.name,
+        description=payload.description,
+        pdf_url=str(payload.pdf_url),
+        linked_document_id=document.id,
+        status="mineru_queued",
+        text_review_status="pending",
+        mineru_artifacts={},
+    )
+    db.add(source)
+    record_audit(
+        db,
+        action="import_url",
+        entity_type="source_document",
+        entity_id=source.id,
+        summary=f"Imported {source.name} from URL",
+        after=source,
+    )
+    db.commit()
+    db.refresh(source)
+    background_tasks.add_task(run_mineru_pipeline, document.id)
+    return source
 
 
 @app.get("/api/documents", response_model=list[schemas.DocumentRead])
@@ -101,6 +175,7 @@ def get_document(document_id: int, db: Session = Depends(get_db)) -> models.Docu
 @app.delete("/api/documents/{document_id}")
 def delete_document(document_id: int, db: Session = Depends(get_db)) -> dict[str, bool]:
     document = require_document(db, document_id)
+    before = model_snapshot(document)
     linked_sources = (
         db.query(models.SourceDocument)
         .filter(models.SourceDocument.linked_document_id == document.id)
@@ -125,6 +200,14 @@ def delete_document(document_id: int, db: Session = Depends(get_db)) -> dict[str
         for source in linked_sources:
             db.delete(source)
     db.delete(document)
+    record_audit(
+        db,
+        action="delete",
+        entity_type="document",
+        entity_id=str(document_id),
+        summary=f"Deleted converted document {document.name}",
+        before=before,
+    )
     db.commit()
 
     document_dir = settings.storage_root / "documents" / str(document_id)
@@ -147,6 +230,34 @@ def get_outline(document_id: int, db: Session = Depends(get_db)) -> list[schemas
         for section in sections
     ]
     return build_schema_tree(parsed)
+
+
+@app.get("/api/documents/{document_id}/markers", response_model=list[schemas.DocumentMarkerRead])
+def get_document_markers(document_id: int, role: str = "auto", db: Session = Depends(get_db)) -> list[schemas.DocumentMarkerRead]:
+    document = require_document(db, document_id)
+    source = (
+        db.query(models.SourceDocument)
+        .filter(models.SourceDocument.linked_document_id == document.id)
+        .order_by(models.SourceDocument.created_at.desc())
+        .first()
+    )
+    doc_type = role if role != "auto" else (source.doc_type if source else "rulebook")
+    markers: list[schemas.DocumentMarkerRead] = []
+    for section in document.sections:
+        text = f"{section.title}\n{section.content}"
+        for marker in find_document_markers(text, doc_type):
+            markers.append(
+                schemas.DocumentMarkerRead(
+                    section_id=section.id,
+                    marker_type=marker.marker_type,
+                    text=marker.text,
+                    start=marker.start,
+                    end=marker.end,
+                    color=marker.color,  # type: ignore[arg-type]
+                    confidence=marker.confidence,
+                )
+            )
+    return markers
 
 
 @app.get("/api/documents/{document_id}/source-pdf")
@@ -172,6 +283,51 @@ def get_source_pdf(document_id: int, download: bool = False, db: Session = Depen
     )
 
 
+@app.get("/api/documents/{document_id}/pages/{page}/preview")
+def get_document_page_preview(document_id: int, page: int, db: Session = Depends(get_db)) -> FileResponse:
+    if page < 1:
+        raise HTTPException(status_code=422, detail="Page must be 1 or greater.")
+    document = require_document(db, document_id)
+    preview_dir = settings.storage_root / "documents" / str(document.id) / "previews"
+    preview_path = preview_dir / f"page-{page}.png"
+    if not preview_path.exists():
+        manifest = dict(document.artifact_manifest or {})
+        raw_source_path = manifest.get("source_pdf_path")
+        if not raw_source_path:
+            raise HTTPException(status_code=404, detail="Source PDF is not cached yet.")
+        source_path = Path(str(raw_source_path))
+        if not source_path.exists():
+            raise HTTPException(status_code=404, detail="Source PDF is not cached yet.")
+        try:
+            import fitz  # type: ignore
+
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            pdf = fitz.open(source_path)
+            if page > len(pdf):
+                raise HTTPException(status_code=404, detail="PDF page not found.")
+            pixmap = pdf[page - 1].get_pixmap(matrix=fitz.Matrix(0.45, 0.45), alpha=False)
+            pixmap.save(preview_path)
+            pdf.close()
+        except ImportError:
+            if page != 1:
+                raise HTTPException(status_code=501, detail="Install PyMuPDF to preview pages after page one.")
+            preview_dir.mkdir(parents=True, exist_ok=True)
+            result = subprocess.run(
+                ["sips", "-Z", "420", "-s", "format", "png", str(source_path), "--out", str(preview_path)],
+                capture_output=True,
+                check=False,
+                text=True,
+                timeout=30,
+            )
+            if result.returncode != 0 or not preview_path.exists():
+                raise HTTPException(status_code=501, detail="PDF preview generation requires PyMuPDF.")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=501, detail=f"PDF preview generation is unavailable: {exc}") from exc
+    return FileResponse(preview_path, media_type="image/png")
+
+
 @app.put("/api/documents/{document_id}/sections/{section_id}", response_model=schemas.SectionRead)
 def update_section(
     document_id: int,
@@ -192,6 +348,54 @@ def update_section(
     return section
 
 
+@app.patch("/api/documents/{document_id}/sections/{section_id}", response_model=schemas.SectionRead)
+def patch_section(
+    document_id: int,
+    section_id: str,
+    payload: schemas.SectionPatch,
+    db: Session = Depends(get_db),
+) -> models.Section:
+    section = (
+        db.query(models.Section)
+        .filter(models.Section.document_id == document_id, models.Section.id == section_id)
+        .first()
+    )
+    if not section:
+        raise HTTPException(status_code=404, detail="Section not found")
+    before = model_snapshot(section)
+    data = payload.model_dump(exclude_unset=True)
+    old_title = section.title
+    for key, value in data.items():
+        setattr(section, key, value)
+    if "title" in data and data["title"] != old_title:
+        descendants = (
+            db.query(models.Section)
+            .filter(models.Section.document_id == document_id, models.Section.position > section.position)
+            .order_by(models.Section.position)
+            .all()
+        )
+        for descendant in descendants:
+            path = list(descendant.heading_path or [])
+            try:
+                index = path.index(old_title)
+            except ValueError:
+                continue
+            path[index] = section.title
+            descendant.heading_path = path
+    record_audit(
+        db,
+        action="update",
+        entity_type="section",
+        entity_id=section.id,
+        summary=f"Updated section {section.title}",
+        before=before,
+        after=section,
+    )
+    db.commit()
+    db.refresh(section)
+    return section
+
+
 @app.post("/api/documents/{document_id}/extract-rules", response_model=schemas.ExtractRulesResponse)
 def extract_document_rules(
     document_id: int,
@@ -199,6 +403,20 @@ def extract_document_rules(
     db: Session = Depends(get_db),
 ) -> schemas.ExtractRulesResponse:
     document = require_document(db, document_id)
+    linked_source = (
+        db.query(models.SourceDocument)
+        .filter(models.SourceDocument.linked_document_id == document.id)
+        .order_by(models.SourceDocument.created_at.desc())
+        .first()
+    )
+    if linked_source and linked_source.doc_type not in {"rulebook", "reference_clause"}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Rule extraction is only available for rulebook/reference documents. "
+                "Use template field extraction for tender templates."
+            ),
+        )
     if not document.sections:
         raise HTTPException(status_code=409, detail="Document has no Markdown sections to extract from.")
     if not effective_llm_key():
@@ -228,6 +446,7 @@ def update_rule(rule_id: str, payload: schemas.RuleUpdate, db: Session = Depends
     rule = db.query(models.Rule).filter(models.Rule.id == rule_id).first()
     if not rule:
         raise HTTPException(status_code=404, detail="Rule not found")
+    before = model_snapshot(rule)
     data = payload.model_dump()
     for key, value in data.items():
         if key == "source" and hasattr(value, "model_dump"):
@@ -235,6 +454,15 @@ def update_rule(rule_id: str, payload: schemas.RuleUpdate, db: Session = Depends
         elif key in {"options", "dependencies"}:
             value = [item.model_dump() if hasattr(item, "model_dump") else item for item in value]
         setattr(rule, key, value)
+    record_audit(
+        db,
+        action="update",
+        entity_type="rule",
+        entity_id=rule.id,
+        summary=f"Updated rule {rule.subject or rule.id}",
+        before=before,
+        after=rule,
+    )
     db.commit()
     db.refresh(rule)
     return rule
@@ -394,6 +622,7 @@ def run_mineru_pipeline(document_id: int) -> None:
     try:
         document = require_document(db, document_id)
         document.status = "mineru_submitting"
+        sync_linked_source_status(db, document_id, document.status)
         db.commit()
 
         config = get_runtime_config()
@@ -429,6 +658,7 @@ def run_mineru_pipeline(document_id: int) -> None:
         task_id = client.submit_task(document.pdf_url)
         document.mineru_task_id = task_id
         document.status = "mineru_processing"
+        sync_linked_source_status(db, document_id, document.status)
         db.commit()
 
         result = client.poll_until_done(task_id)
@@ -461,6 +691,16 @@ def run_mineru_pipeline(document_id: int) -> None:
             manifest=manifest,
         )
         document.status = "markdown_ready"
+        sync_linked_source_status(db, document_id, document.status)
+        record_audit(
+            db,
+            action="conversion_complete",
+            entity_type="document",
+            entity_id=str(document.id),
+            summary=f"Converted {document.name} and prepared Markdown for review",
+            after=document,
+            actor="System",
+        )
         db.commit()
     except (MinerUError, Exception) as exc:
         db.rollback()
@@ -468,6 +708,16 @@ def run_mineru_pipeline(document_id: int) -> None:
         if document:
             document.status = "mineru_failed"
             document.error_message = str(exc)
+            sync_linked_source_status(db, document_id, document.status)
+            record_audit(
+                db,
+                action="conversion_failed",
+                entity_type="document",
+                entity_id=str(document.id),
+                summary=f"Conversion failed for {document.name}",
+                after=document,
+                actor="System",
+            )
             db.commit()
     finally:
         db.close()
@@ -479,6 +729,7 @@ def run_rule_extraction_pipeline(document_id: int) -> None:
         document = require_document(db, document_id)
         document.status = "extracting_rules"
         document.error_message = None
+        sync_linked_source_status(db, document_id, document.status)
         db.commit()
 
         config = get_runtime_config()
@@ -496,11 +747,24 @@ def run_rule_extraction_pipeline(document_id: int) -> None:
             concurrency=config.llm_concurrency,
             system_prompt=config.extraction_prompt,
         )
+        db.refresh(document)
+        sync_linked_source_status(db, document_id, document.status)
+        record_audit(
+            db,
+            action="rule_extraction_complete",
+            entity_type="document",
+            entity_id=str(document.id),
+            summary=f"Extracted rules from {document.name}",
+            after=document,
+            actor="System",
+        )
+        db.commit()
     except (LLMError, Exception) as exc:
         document = db.query(models.Document).filter(models.Document.id == document_id).first()
         if document:
             document.status = "rule_extraction_failed"
             document.error_message = str(exc)
+            sync_linked_source_status(db, document_id, document.status)
             db.commit()
     finally:
         db.close()
@@ -645,3 +909,11 @@ def require_document(db: Session, document_id: int) -> models.Document:
     if not document:
         raise HTTPException(status_code=404, detail="Document not found")
     return document
+
+
+def sync_linked_source_status(db: Session, document_id: int, status: str) -> None:
+    (
+        db.query(models.SourceDocument)
+        .filter(models.SourceDocument.linked_document_id == document_id)
+        .update({"status": status}, synchronize_session=False)
+    )

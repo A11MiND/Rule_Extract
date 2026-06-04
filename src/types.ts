@@ -1,10 +1,18 @@
+export type DocumentStatus =
+  | "idle" | "created"
+  | "mineru_queued" | "mineru_submitting" | "mineru_processing" | "markdown_ready"
+  | "rule_extraction_queued" | "extracting_rules" | "rules_extracted"
+  | "rules_verified" | "rule_extraction_failed" | "mineru_failed"
+  | "fields_extracted" | "fields_verified"
+  | "evidence_extracted" | "checked";
+
 export interface DocumentJob {
   id: number;
   name: string;
   pdf_url: string;
   contract_family: string;
   grouping_level: number;
-  status: string;
+  status: DocumentStatus;
   mineru_task_id?: string | null;
   mineru_state?: string | null;
   error_message?: string | null;
@@ -63,6 +71,8 @@ export interface Section {
   title: string;
   heading_path: string[];
   content: string;
+  page_range?: string | null;
+  coordinates: Record<string, unknown>[];
   classification?: string | null;
   classification_confidence?: number | null;
   children: Section[];
@@ -102,6 +112,12 @@ export interface Rule {
   actor?: string | null;
   target?: string | null;
   deadline?: string | null;
+  severity: string;
+  applicability: Record<string, unknown>;
+  evidence_requirements: Record<string, unknown>[];
+  validation_method: string;
+  references: Record<string, unknown>[];
+  mapping_status: string;
   options: RuleOption[];
   dependencies: RuleDependency[];
   next_rule_ids: string[];
@@ -122,7 +138,7 @@ export interface DocumentCollection {
   contract_family: string;
   jurisdiction: string;
   version: string;
-  status: string;
+  status: DocumentStatus;
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -130,10 +146,15 @@ export interface DocumentCollection {
 export interface SourceDocument {
   id: string;
   collection_id: string;
+  slot_id?: string | null;
   doc_type: "rulebook" | "reference_clause" | "template" | "tender_submission";
   name: string;
+  description: string;
   pdf_url: string;
-  status: string;
+  status: DocumentStatus;
+  text_review_status: string;
+  text_verified_at?: string | null;
+  content_fingerprint: string;
   mineru_artifacts: Record<string, unknown>;
   linked_document_id?: number | null;
   created_at?: string | null;
@@ -152,9 +173,28 @@ export interface TemplateField {
   required: boolean;
   section_ref?: string | null;
   extraction_hint: string;
+  check_intent: string;
+  structured_schema: Record<string, unknown>;
+  normalization: Record<string, unknown>;
+  evidence_locator: EvidenceLocator;
+  part_ref: string;
+  filled_by: string;
+  confidence: number;
+  rationale: string;
+  source_window: Record<string, unknown>;
   review_status: "suggested" | "approved" | "rejected" | "needs_edit";
   created_at?: string | null;
   updated_at?: string | null;
+}
+
+export interface DocumentMarker {
+  section_id: string;
+  marker_type: string;
+  text: string;
+  start: number;
+  end: number;
+  color: "yellow" | "blue";
+  confidence: number;
 }
 
 export interface FieldRuleMapping {
@@ -178,7 +218,7 @@ export interface FieldRuleMapping {
 export interface MappingRun {
   id: string;
   collection_id: string;
-  status: string;
+  status: DocumentStatus;
   llm_model: string;
   windows_total: number;
   windows_completed: number;
@@ -193,7 +233,7 @@ export interface TenderSubmission {
   id: string;
   collection_id: string;
   name: string;
-  status: string;
+  status: DocumentStatus;
   source_document_ids: string[];
   created_at?: string | null;
   updated_at?: string | null;
@@ -224,4 +264,64 @@ export interface CheckResult {
   tender_evidence: string;
   review_status: string;
   created_at?: string | null;
+}
+
+export interface EvidenceLocator {
+  source_document_id?: string | null;
+  document_id?: number | null;
+  section_id?: string | null;
+  page_range?: string | null;
+  coordinates?: Record<string, unknown>[];
+  anchor_text?: string;
+}
+
+export interface LibrarySlot {
+  id: string;
+  collection_id: string;
+  name: string;
+  short_name: string;
+  description: string;
+  doc_type: SourceDocument["doc_type"];
+  required: boolean;
+  grouping_level: number;
+  sort_order: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ProcedureSet {
+  id: string;
+  collection_id: string;
+  name: string;
+  version: number;
+  status: "draft" | "approved";
+  template_source_ids: string[];
+  rule_source_ids: string[];
+  mapping_ids: string[];
+  parent_id?: string | null;
+  approved_at?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface AuditEvent {
+  id: string;
+  actor: string;
+  action: string;
+  entity_type: string;
+  entity_id: string;
+  summary: string;
+  before_json: Record<string, unknown>;
+  after_json: Record<string, unknown>;
+  created_at?: string | null;
+}
+
+export interface DashboardSummary {
+  total_documents: number;
+  awaiting_text_review: number;
+  awaiting_record_review: number;
+  processing: number;
+  failed: number;
+  approved_procedure_sets: number;
+  recent_activity: AuditEvent[];
 }

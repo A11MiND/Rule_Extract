@@ -1,50 +1,64 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { debounce } from "./utils/debounce";
+import { lazy, memo, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import DOMPurify from "dompurify";
 import {
   AlertCircle,
   CheckCircle2,
-  Check,
   Download,
   Edit3,
   FileText,
   GitBranch,
-  History as HistoryIcon,
   Loader2,
   Play,
-  Plus,
   Save,
   SearchCheck,
   Settings,
-  Trash2,
   X,
   XCircle,
   Zap
 } from "lucide-react";
 import {
-  createDocument,
-  deleteDocument,
+  bulkReviewSourceRules,
+  confirmSourceText,
+  createLibrarySlot,
+  deleteLibrarySlot,
+  extractTemplateFields,
   extractRules,
   exportUrl,
+  getCollections,
   getDocument,
+  getDocumentMarkers,
   getDocumentStats,
   getDocuments,
   getOutline,
   getRuleGraph,
   getRules,
   getRuntimeConfig,
+  getLibrarySlots,
+  getSourceDocuments,
+  patchSection,
   saveRule,
   saveRuntimeConfig,
-  saveSection
+  updateLibrarySlot
 } from "./api";
-import { WorkflowWorkspace } from "./components/WorkflowWorkspace";
+import { Sidebar } from "./components/Sidebar";
+import type { NavPage } from "./components/Sidebar";
+import { ReviewConfidence, ReviewStatusBadge, ReviewTypeChip } from "./components/ReviewPrimitives";
+import { Alert, Button, Layout, Popconfirm } from "antd";
+import { usePolling } from "./hooks/usePolling";
+import { labelStatus } from "./utils/status";
 import type {
+  DocumentCollection,
   DocumentJob,
+  DocumentMarker,
   DocumentStats,
+  DocumentStatus,
+  LibrarySlot,
   Rule,
   RuleGraph,
   RuntimeConfig,
   RuntimeConfigUpdate,
-  Section
+  Section,
+  SourceDocument
 } from "./types";
 
 const READY_STATUSES = new Set([
@@ -55,32 +69,49 @@ const READY_STATUSES = new Set([
   "rule_extraction_failed"
 ]);
 const TERMINAL_STATUSES = new Set(["mineru_failed", "rule_extraction_failed", "rules_extracted"]);
-const VIEWS = ["workflow", "processing", "review", "map", "config"] as const;
-type View = (typeof VIEWS)[number];
+type View = NavPage;
+type DocumentView = "queue" | "document-review" | "rule-review";
+const WORKBENCH_VIEWS: View[] = ["dashboard", "sources", "queue", "field-review", "mapping-review", "submissions", "results", "activity"];
+const ProfessionalWorkbench = lazy(() =>
+  import("./components/ProfessionalWorkbench").then((module) => ({ default: module.ProfessionalWorkbench }))
+);
 
 export function App() {
   const [documentJob, setDocumentJob] = useState<DocumentJob | null>(null);
   const [documents, setDocuments] = useState<DocumentJob[]>([]);
+  const [sourceDocuments, setSourceDocuments] = useState<SourceDocument[]>([]);
   const [runtimeConfig, setRuntimeConfig] = useState<RuntimeConfig | null>(null);
   const [stats, setStats] = useState<DocumentStats | null>(null);
   const [sections, setSections] = useState<Section[]>([]);
+  const [documentMarkers, setDocumentMarkers] = useState<DocumentMarker[]>([]);
   const [rules, setRules] = useState<Rule[]>([]);
   const [graph, setGraph] = useState<RuleGraph>({ nodes: [], edges: [] });
-  const [activeView, setActiveView] = useState<View>("workflow");
+  const initialRoute = useMemo(() => viewFromPath(window.location.pathname), []);
+  const [activeView, setActiveView] = useState<View>(initialRoute.view);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [toast, setToast] = useState<{ text: string; type: "success" | "info" } | null>(null);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [toasts, setToasts] = useState<Array<{ id: number; text: string; type: "success" | "info" }>>([]);
   const [workflowRefreshKey, setWorkflowRefreshKey] = useState(0);
+  const toastIdRef = useRef(0);
   const previousStatusRef = useRef<string | null>(null);
+  const routeSourceIdRef = useRef<string | null>(initialRoute.sourceId);
 
   function showToast(text: string, type: "success" | "info" = "success") {
-    setToast({ text, type });
-    setTimeout(() => setToast(null), 3500);
+    const id = ++toastIdRef.current;
+    setToasts((prev) => [...prev, { id, text, type }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 3500);
   }
 
   const loadDocuments = useCallback(async () => {
-    const nextDocuments = await getDocuments();
+    const [nextDocuments, nextSourceDocuments] = await Promise.all([
+      getDocuments(),
+      getSourceDocuments().catch(() => [])
+    ]);
     setDocuments(nextDocuments);
+    setSourceDocuments(nextSourceDocuments);
     return nextDocuments;
   }, []);
 
@@ -93,48 +124,32 @@ export function App() {
           setDocumentJob(latestDocument);
         }
       })
-      .catch(() => undefined);
+      .catch(() => undefined)
+      .finally(() => setInitialLoading(false));
   }, [loadDocuments]);
 
   useEffect(() => {
-    if (!documentJob || TERMINAL_STATUSES.has(documentJob.status)) {
-      return;
-    }
-    let stopped = false;
-    let failureCount = 0;
-    const poll = async () => {
-      const jitter = (Math.random() - 0.5) * 1000;
-      const next = await getDocument(documentJob.id).catch((err) => {
-        failureCount++;
-        setError(err.message);
-        return null;
-      });
-      if (stopped) return;
-      if (next) {
-        failureCount = 0;
-        setDocumentJob(next);
-        setDocuments((current) => current.map((document) => (document.id === next.id ? next : document)));
-      }
-    };
-    const baseInterval = 2500;
-    let currentInterval = baseInterval;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const schedule = () => {
-      const jitter = (Math.random() - 0.5) * 1000;
-      timer = window.setTimeout(async () => {
-        await poll();
-        if (!stopped) {
-          currentInterval = Math.min(currentInterval * (failureCount > 0 ? 2 : 1), 30000);
-          schedule();
-        }
-      }, currentInterval + jitter);
-    };
-    schedule();
-    return () => {
-      stopped = true;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [documentJob?.id, documentJob?.status]);
+    const sourceId = routeSourceIdRef.current;
+    if (!sourceId) return;
+    const source = sourceDocuments.find((item) => item.id === sourceId);
+    const selected = documents.find((item) => item.id === source?.linked_document_id);
+    if (!selected || documentJob?.id === selected.id) return;
+    setDocumentJob(selected);
+    previousStatusRef.current = selected.status;
+    if (READY_STATUSES.has(selected.status)) refreshDocumentData(selected.id);
+  }, [documents, sourceDocuments]);
+
+  // Poll document job status
+  const isDocumentPolling = documentJob !== null && !TERMINAL_STATUSES.has(documentJob.status);
+  usePolling({
+    enabled: isDocumentPolling,
+    fetcher: () => getDocument(documentJob!.id),
+    onResult: (next) => {
+      setDocumentJob(next);
+      setDocuments((current) => current.map((doc) => (doc.id === next.id ? next : doc)));
+    },
+    onError: (err) => setError(err instanceof Error ? err.message : String(err)),
+  });
 
   useEffect(() => {
     if (!documentJob || !READY_STATUSES.has(documentJob.status)) {
@@ -146,86 +161,41 @@ export function App() {
   useEffect(() => {
     const previousStatus = previousStatusRef.current;
     const nextStatus = documentJob?.status ?? null;
-    if (activeView === "processing" && previousStatus && previousStatus !== "markdown_ready" && nextStatus === "markdown_ready") {
-      setActiveView("review");
+    if (activeView === "queue" && previousStatus && previousStatus !== "markdown_ready" && nextStatus === "markdown_ready") {
+      setActiveView("document-review");
     }
     previousStatusRef.current = nextStatus;
   }, [activeView, documentJob?.status]);
 
-  useEffect(() => {
-    if (!documentJob || TERMINAL_STATUSES.has(documentJob.status)) {
-      return;
-    }
-    let stopped = false;
-    let failureCount = 0;
-    let currentInterval = 2000;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const poll = () => {
-      getDocumentStats(documentJob.id).then(setStats).catch((err: Error) => {
-        failureCount++;
-        setError((prev) => prev || err.message);
-      });
-    };
-    const schedule = () => {
-      const jitter = (Math.random() - 0.5) * 600;
-      timer = window.setTimeout(() => {
-        poll();
-        if (!stopped) {
-          currentInterval = Math.min(currentInterval * (failureCount > 0 ? 2 : 1), 30000);
-          schedule();
-        }
-      }, currentInterval + jitter);
-    };
-    schedule();
-    return () => {
-      stopped = true;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [documentJob?.id, documentJob?.status]);
+  // Poll document stats
+  const isStatsPolling = documentJob !== null && !TERMINAL_STATUSES.has(documentJob.status);
+  usePolling({
+    enabled: isStatsPolling,
+    fetcher: () => getDocumentStats(documentJob!.id),
+    onResult: setStats,
+    onError: (err) => setError((prev) => prev || (err instanceof Error ? err.message : String(err))),
+    interval: 2000,
+    jitterRange: 600,
+  });
 
-  useEffect(() => {
-    if (
-      !documentJob ||
-      !["rule_extraction_queued", "extracting_rules"].includes(documentJob.status)
-    ) {
-      return;
-    }
-    let stopped = false;
-    let failureCount = 0;
-    let currentInterval = 2500;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const refreshRuleOutputs = async () => {
-      try {
-        const [nextRules, nextGraph, nextStats] = await Promise.all([
-          getRules(documentJob.id).catch(() => []),
-          getRuleGraph(documentJob.id).catch(() => ({ nodes: [], edges: [] })),
-          getDocumentStats(documentJob.id).catch(() => null)
-        ]);
-        failureCount = 0;
-        setRules(nextRules);
-        setGraph(nextGraph);
-        if (nextStats) setStats(nextStats);
-      } catch {
-        failureCount++;
-      }
-    };
-    const schedule = () => {
-      const jitter = (Math.random() - 0.5) * 1000;
-      timer = window.setTimeout(() => {
-        refreshRuleOutputs().then(() => {
-          if (!stopped) {
-            currentInterval = Math.min(currentInterval * (failureCount > 0 ? 2 : 1), 30000);
-            schedule();
-          }
-        });
-      }, currentInterval + jitter);
-    };
-    schedule();
-    return () => {
-      stopped = true;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [documentJob?.id, documentJob?.status]);
+  // Poll rules extraction progress
+  const isExtractingRules = documentJob !== null && ["rule_extraction_queued", "extracting_rules"].includes(documentJob.status);
+  usePolling({
+    enabled: isExtractingRules,
+    fetcher: async () => {
+      const [nextRules, nextGraph, nextStats] = await Promise.all([
+        getRules(documentJob!.id).catch(() => []),
+        getRuleGraph(documentJob!.id).catch(() => ({ nodes: [], edges: [] })),
+        getDocumentStats(documentJob!.id).catch(() => null),
+      ]);
+      return { nextRules, nextGraph, nextStats };
+    },
+    onResult: ({ nextRules, nextGraph, nextStats }) => {
+      setRules(nextRules);
+      setGraph(nextGraph);
+      if (nextStats) setStats(nextStats);
+    },
+  });
 
   async function refreshDocumentData(documentId: number) {
     const [outline, nextRules, nextGraph, nextStats] = await Promise.all([
@@ -234,7 +204,9 @@ export function App() {
       getRuleGraph(documentId).catch(() => ({ nodes: [], edges: [] })),
       getDocumentStats(documentId).catch(() => null)
     ]);
+    const markers = await getDocumentMarkers(documentId).catch(() => []);
     setSections(outline);
+    setDocumentMarkers(markers);
     setRules(nextRules);
     setGraph(nextGraph);
     if (nextStats) setStats(nextStats);
@@ -254,27 +226,20 @@ export function App() {
     }
   }
 
-  async function handleCreate(payload: { name: string; pdf_url: string; grouping_level?: number }) {
-    setBusy(true);
-    setError("");
-    try {
-      const created = await createDocument(payload);
-      setDocumentJob(created);
-      setDocuments((current) => [created, ...current.filter((document) => document.id !== created.id)]);
-      setActiveView("processing");
-      setSections([]);
-      setRules([]);
-      setGraph({ nodes: [], edges: [] });
-      setStats(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to create document");
-    } finally {
-      setBusy(false);
-    }
-  }
+  const resetDocumentData = useCallback(() => {
+    setSections([]);
+    setDocumentMarkers([]);
+    setRules([]);
+    setGraph({ nodes: [], edges: [] });
+    setStats(null);
+  }, []);
 
   async function handleExtract() {
     if (!documentJob) return;
+    if (!canExtractRulesForSource(sourceForDocument(documentJob.id, sourceDocuments))) {
+      setError("This document is a tender template. Use Extract Fields in the Template workflow instead of rule extraction.");
+      return;
+    }
     setBusy(true);
     setError("");
     setRules([]);
@@ -282,7 +247,7 @@ export function App() {
     try {
       await extractRules(documentJob.id);
       showToast("Rule extraction started — tracking progress below", "info");
-      setActiveView("processing");
+      setActiveView("queue");
       const [nextDocument, nextRules, nextGraph] = await Promise.all([
         getDocument(documentJob.id),
         getRules(documentJob.id),
@@ -298,75 +263,17 @@ export function App() {
     }
   }
 
-  async function handleSelectDocument(documentId: number) {
+  async function handleOpenDocument(documentId: number, view: DocumentView) {
     if (!documentId) return;
     setBusy(true);
     setError("");
     try {
       const selected = await getDocument(documentId);
-      setDocumentJob(selected);
-      previousStatusRef.current = selected.status;
-      setActiveView(defaultViewForStatus(selected.status));
-      setSections([]);
-      setRules([]);
-      setGraph({ nodes: [], edges: [] });
-      setStats(null);
-      if (READY_STATUSES.has(selected.status)) {
-        refreshDocumentData(selected.id);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load document history");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleDeleteCurrentHistory() {
-    if (!documentJob) return;
-    const confirmed = window.confirm(`Delete history item #${documentJob.id} "${documentJob.name}"? This also removes its converted text, extracted rules, and workflow source record.`);
-    if (!confirmed) return;
-    setBusy(true);
-    setError("");
-    try {
-      await deleteDocument(documentJob.id);
-      const nextDocuments = await loadDocuments();
-      const nextDocument = nextDocuments.find((document) => document.id !== documentJob.id) ?? null;
-      setDocumentJob(nextDocument);
-      previousStatusRef.current = nextDocument?.status ?? null;
-      setSections([]);
-      setRules([]);
-      setGraph({ nodes: [], edges: [] });
-      setStats(null);
-      setWorkflowRefreshKey((value) => value + 1);
-      if (activeView !== "workflow") {
-        setActiveView(nextDocument ? defaultViewForStatus(nextDocument.status) : "workflow");
-      }
-      if (nextDocument && READY_STATUSES.has(nextDocument.status)) {
-        refreshDocumentData(nextDocument.id);
-      } else if (!nextDocument) {
-        setActiveView("workflow");
-      }
-      showToast("History item deleted", "success");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to delete history item");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function handleOpenDocument(documentId: number, view: "review" | "map" | "processing") {
-    if (!documentId) return;
-    setBusy(true);
-    setError("");
-    try {
-      const selected = await getDocument(documentId);
+      routeSourceIdRef.current = sourceForDocument(documentId, sourceDocuments)?.id ?? null;
       setDocumentJob(selected);
       previousStatusRef.current = selected.status;
       setActiveView(view);
-      setSections([]);
-      setRules([]);
-      setGraph({ nodes: [], edges: [] });
-      setStats(null);
+      resetDocumentData();
       if (READY_STATUSES.has(selected.status)) {
         refreshDocumentData(selected.id);
       }
@@ -377,166 +284,266 @@ export function App() {
     }
   }
 
-  function handleNewWork() {
-    setDocumentJob(null);
-    setActiveView("workflow");
-    setSections([]);
-    setRules([]);
-    setGraph({ nodes: [], edges: [] });
-    setStats(null);
-    setError("");
-    previousStatusRef.current = null;
-    loadDocuments().catch(() => undefined);
-  }
-
   const canExtractRules =
     documentJob &&
-    activeView !== "workflow" &&
+    !WORKBENCH_VIEWS.includes(activeView) &&
+    canExtractRulesForSource(sourceForDocument(documentJob.id, sourceDocuments)) &&
     (documentJob.status === "markdown_ready" ||
       documentJob.status === "rule_extraction_failed" ||
       (documentJob.status === "rules_extracted" && (stats?.rules_extracted ?? rules.length) === 0));
   const extractButtonLabel = documentJob?.status === "markdown_ready" ? "Extract Rules" : "Retry Extract Rules";
   const apiReady = Boolean(runtimeConfig?.mineru_configured && runtimeConfig?.llm_configured);
+  const currentSource = documentJob ? sourceForDocument(documentJob.id, sourceDocuments) : null;
+  const currentDisplayStatus = documentJob ? displayStatusForDocument(documentJob, currentSource) : "idle";
+
+  useEffect(() => {
+    if (currentSource) routeSourceIdRef.current = currentSource.id;
+    const nextPath = routeForView(activeView, currentSource?.id ?? routeSourceIdRef.current);
+    if (window.location.pathname !== nextPath) window.history.replaceState({}, "", nextPath);
+  }, [activeView, currentSource?.id]);
+
+  async function handleConfirmAndContinue() {
+    if (!currentSource || !documentJob) {
+      setError("Select a source document before confirming the converted text.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      await confirmSourceText(currentSource.id);
+      if (currentSource.doc_type === "template") {
+        if (!["fields_extracted", "fields_verified"].includes(currentSource.status)) {
+          await extractTemplateFields(currentSource.id);
+        }
+        setActiveView("field-review");
+        showToast("Document text confirmed and template fields prepared", "success");
+      } else if (["rules_extracted", "rules_verified"].includes(currentSource.status) || rules.length > 0) {
+        setActiveView("rule-review");
+        showToast("Document text confirmed", "success");
+      } else {
+        await extractRules(documentJob.id);
+        setActiveView("queue");
+        showToast("Document text confirmed and rule extraction started", "info");
+      }
+      await loadDocuments();
+      setWorkflowRefreshKey((value) => value + 1);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to confirm document text");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleApproveAllRules() {
+    if (!currentSource) return;
+    setBusy(true);
+    setError("");
+    try {
+      const result = await bulkReviewSourceRules(currentSource.id, "reviewed");
+      await refreshDocumentData(documentJob!.id);
+      await loadDocuments();
+      setWorkflowRefreshKey((value) => value + 1);
+      showToast(`${result.updated} outstanding rules approved`, "success");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to approve rules");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (initialLoading) {
+    return (
+      <main className="app-shell" style={{ display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh" }}>
+        <div style={{ textAlign: "center", color: "#40566b" }}>
+          <Loader2 className="spin" size={32} style={{ display: "block", margin: "0 auto 12px" }} />
+          <p style={{ fontSize: 15, fontWeight: 600 }}>Loading workspace...</p>
+        </div>
+      </main>
+    );
+  }
+
+  function handleSidebarNav(page: NavPage) {
+    if (page === "document-review" || page === "rule-review") {
+      const candidates = sourceDocuments.filter((source) =>
+        source.linked_document_id && (page === "document-review" || canExtractRulesForSource(source))
+      );
+      const currentIsValid = documentJob && candidates.some((source) => source.linked_document_id === documentJob.id);
+      if (!currentIsValid && candidates[0]?.linked_document_id) {
+        handleOpenDocument(candidates[0].linked_document_id, page);
+        return;
+      }
+    }
+    setActiveView(page);
+  }
 
   return (
-    <main className="app-shell">
-      <header className="topbar">
-        <div>
-          <p className="eyebrow">NEC Public Works Practice Notes</p>
-          <h1>Rule Extraction Portal</h1>
-        </div>
-        <div className="topbar-actions">
-          <button className={`secondary-button setup-button ${apiReady ? "ready" : "missing"}`} type="button" onClick={() => setActiveView("config")}>
-            <Settings size={16} />
-            Settings
-            <span className="setup-dot" aria-hidden="true" />
-          </button>
-          <button className="secondary-button" type="button" onClick={handleNewWork}>
-            <Plus size={16} />
-            New Work
-          </button>
-          <label className="history-picker">
-            <HistoryIcon size={16} />
-            <select
-              aria-label="Document history"
-              disabled={!documents.length || busy}
-              value={documentJob?.id ?? ""}
-              onChange={(event) => handleSelectDocument(Number(event.target.value))}
-            >
-              <option value="">History</option>
-              {documents.map((document) => (
-                <option key={document.id} value={document.id}>
-                  #{document.id} {document.name} - {labelStatus(document.status)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            aria-label="Delete selected history item"
-            className="icon-button history-delete"
-            disabled={!documentJob || busy}
-            onClick={handleDeleteCurrentHistory}
-            type="button"
-            title="Delete selected history item"
-          >
-            <Trash2 size={15} />
-          </button>
-          <StatusBadge status={documentJob?.status ?? "idle"} />
-        </div>
-      </header>
-
-      {activeView !== "workflow" ? (
-        <div className="detail-toolbar">
-          <button className="secondary-button compact" type="button" onClick={() => setActiveView("workflow")}>
-            Back to Workflow
-          </button>
-          <strong>{viewLabel(activeView)}</strong>
-        </div>
-      ) : null}
-
-      {activeView === "workflow" && runtimeConfig && !apiReady ? (
-        <div className="setup-callout">
-          <div>
-            <strong>Connect the conversion and rule extraction services first.</strong>
-            <span>API keys stay in this backend session and are not exported.</span>
+    <Layout className="tv-app" style={{ minHeight: "100vh" }}>
+      <Sidebar
+        activePage={activeView}
+        onNavigate={handleSidebarNav}
+      />
+      <Layout className="app-main-layout">
+        <Layout.Header className="app-header">
+          <div className="app-title-row">
+            <strong>Tender Vetting</strong>
+            {activeView !== "dashboard" && (
+              <span>
+                / {viewLabel(activeView)}
+              </span>
+            )}
           </div>
-          <button className="primary-button compact" type="button" onClick={() => setActiveView("config")}>
-            Open Settings
-          </button>
-        </div>
-      ) : null}
+          <div className="topbar-actions">
+            <Button className={`setup-button ${apiReady ? "ready" : "missing"}`} type="default" onClick={() => setActiveView("settings")} icon={<Settings size={16} />}>
+              Settings
+              <span className="setup-dot" aria-hidden="true" />
+            </Button>
+            <Button href="http://127.0.0.1:8000/docs" target="_blank">API Docs</Button>
+          </div>
+        </Layout.Header>
 
-      {documentJob ? <TopProgressBar documentJob={documentJob} stats={stats} /> : null}
+        <Layout.Content className="app-content">
+          {WORKBENCH_VIEWS.includes(activeView) && runtimeConfig && !apiReady ? (
+            <Alert
+              className="setup-alert"
+              type="info"
+              showIcon
+              message="Connect the conversion and rule extraction services first."
+              description="API keys stay in this backend session and are not exported."
+              action={<Button type="primary" size="small" onClick={() => setActiveView("settings")}>Open Settings</Button>}
+            />
+          ) : null}
 
-      {toast ? (
-        <div className={`toast-banner toast-${toast.type}`} role="status">
-          {toast.type === "success" ? <CheckCircle2 size={18} /> : <Zap size={18} />}
-          <span>{toast.text}</span>
-          <button className="toast-dismiss" onClick={() => setToast(null)} type="button" aria-label="Dismiss">
-            <X size={16} />
-          </button>
-        </div>
-      ) : null}
-      {error ? (
-        <div className="alert" role="alert">
-          <AlertCircle size={18} />
-          <span>{error}</span>
-          <button className="toast-dismiss" onClick={() => setError("")} type="button" aria-label="Dismiss">
-            <X size={16} />
-          </button>
-        </div>
-      ) : null}
+          {toasts.map((t) => (
+            <Alert
+              className="toast-banner"
+              type={t.type === "success" ? "success" : "info"}
+              showIcon
+              closable
+              key={t.id}
+              message={t.text}
+              onClose={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))}
+            />
+          ))}
+          {error ? (
+            <Alert
+              className="app-alert"
+              type="error"
+              showIcon
+              closable
+              message={error}
+              onClose={() => setError("")}
+            />
+          ) : null}
 
-      {activeView === "workflow" ? (
-        <section className="portal-page">
-          <WorkflowWorkspace key={workflowRefreshKey} onOpenDocument={handleOpenDocument} />
-        </section>
-      ) : null}
+          {activeView === "document-review" || activeView === "rule-review" ? (
+            <div className="document-context-bar">
+              <div>
+                <span>Active document</span>
+                <strong>{currentSource?.name ?? "Select a document"}</strong>
+              </div>
+              <label>
+                <span className="sr-only">Select document</span>
+                <select
+                  aria-label="Select document"
+                  disabled={busy}
+                  value={documentJob?.id ?? ""}
+                  onChange={(event) => handleOpenDocument(Number(event.target.value), activeView)}
+                >
+                  <option value="">Select a document</option>
+                  {sourceDocuments
+                    .filter((source) => source.linked_document_id && (activeView === "document-review" || canExtractRulesForSource(source)))
+                    .map((source) => (
+                      <option key={source.id} value={source.linked_document_id ?? ""}>{source.name}</option>
+                    ))}
+                </select>
+              </label>
+              {documentJob ? <StatusBadge status={currentDisplayStatus} /> : null}
+            </div>
+          ) : null}
 
-      {activeView === "config" ? (
-        <section className="portal-page import-page">
-          <RuntimeConfigPanel runtimeConfig={runtimeConfig} onSave={handleSaveRuntimeConfig} busy={busy} />
-          <ExtractionSettingsPanel runtimeConfig={runtimeConfig} onSave={handleSaveRuntimeConfig} busy={busy} />
-        </section>
-      ) : null}
+          {WORKBENCH_VIEWS.includes(activeView) ? (
+            <Suspense fallback={<section className="panel workbench-loading"><Loader2 className="spin" size={24} /><span>Loading workspace view...</span></section>}>
+              <ProfessionalWorkbench key={workflowRefreshKey} page={activeView as never} onPageChange={setActiveView} onOpenDocument={handleOpenDocument} />
+            </Suspense>
+          ) : null}
 
-      {activeView === "processing" ? (
-        <section className="portal-page">
-          <ProgressPanel documentJob={documentJob} stats={stats} />
-          {documentJob ? <ExportPanel documentId={documentJob.id} kinds={["mineru-request", "mineru-result", "llm-windows"]} /> : null}
-        </section>
-      ) : null}
+          {activeView === "settings" ? (
+            <div className="page-stack">
+              <div className="tv-page-header">
+                <div>
+                  <span className="tv-eyebrow">Administration</span>
+                  <h2 className="ant-typography">Workspace settings</h2>
+                  <span>Control services, extraction behavior, review policy, display defaults, and API access.</span>
+                </div>
+                <div className="tv-page-actions">
+                  <Button href="http://127.0.0.1:8000/docs" target="_blank">Swagger API</Button>
+                  <Button href="http://127.0.0.1:8000/redoc" target="_blank">ReDoc</Button>
+                  <Button href="http://127.0.0.1:8000/openapi.json" target="_blank">OpenAPI JSON</Button>
+                </div>
+              </div>
+              <div className="settings-overview-grid">
+                <section><strong>Workspace profile</strong><span>Active collection, contract family, jurisdiction, and configurable library placeholders.</span></section>
+                <section><strong>Review policy</strong><span>Human confirmation is required before extraction, bulk decisions preserve rejected records, and approved procedures are immutable.</span></section>
+                <section><strong>Security</strong><span>Service API keys remain session-only and are redacted from audit events.</span></section>
+              </div>
+              <div className="settings-grid">
+                <RuntimeConfigPanel runtimeConfig={runtimeConfig} onSave={handleSaveRuntimeConfig} busy={busy} />
+                <ExtractionSettingsPanel runtimeConfig={runtimeConfig} onSave={handleSaveRuntimeConfig} busy={busy} />
+                <LibrarySlotSettingsPanel />
+              </div>
+            </div>
+          ) : null}
 
-      {activeView === "review" && documentJob && READY_STATUSES.has(documentJob.status) ? (
-        <section className="portal-page">
-          <MarkdownReview
-            documentId={documentJob.id}
-            pdfUrl={`/api/documents/${documentJob.id}/source-pdf`}
-            sections={sections}
-            onSectionsChange={setSections}
-          />
-          <ExportPanel documentId={documentJob.id} kinds={["source-pdf", "markdown"]} />
-        </section>
-      ) : null}
+          {activeView === "document-review" && documentJob && READY_STATUSES.has(documentJob.status) ? (
+            <div className="page-stack">
+              <MarkdownReview
+                documentId={documentJob.id}
+                pdfUrl={`/api/documents/${documentJob.id}/source-pdf`}
+                sections={sections}
+                markers={documentMarkers}
+                onSectionsChange={setSections}
+              />
+              <ExportPanel documentId={documentJob.id} kinds={["source-pdf", "markdown"]} />
+              <div className="sticky-confirm-bar">
+                <div>
+                  <strong>Confirm the converted document text</strong>
+                  <span>This records a content fingerprint and advances to the role-specific review stage.</span>
+                </div>
+                <Button type="primary" size="large" loading={busy} onClick={handleConfirmAndContinue} icon={<CheckCircle2 size={17} />}>
+                  Confirm &amp; Continue
+                </Button>
+              </div>
+            </div>
+          ) : activeView === "document-review" ? (
+            <EmptyDocumentState onGoAssets={() => setActiveView("sources")} />
+          ) : null}
 
-      {activeView === "map" && documentJob && READY_STATUSES.has(documentJob.status) ? (
-        <section className="portal-page">
-          <RuleMap documentId={documentJob.id} graph={graph} rules={rules} sections={sections} onRulesChange={setRules} />
-        </section>
-      ) : null}
+          {activeView === "rule-review" && documentJob && READY_STATUSES.has(documentJob.status) ? (
+            <div className="page-stack">
+              <div className="review-action-strip">
+                <div><strong>{currentSource?.name}</strong><span>{rules.filter((rule) => rule.review_status !== "reviewed" && rule.review_status !== "rejected").length} outstanding rules</span></div>
+                <Popconfirm title="Approve all outstanding rules while preserving rejected rules?" onConfirm={handleApproveAllRules}>
+                  <Button type="primary" loading={busy}>Approve All Outstanding</Button>
+                </Popconfirm>
+              </div>
+              <RuleMap documentId={documentJob.id} graph={graph} rules={rules} sections={sections} onRulesChange={setRules} />
+            </div>
+          ) : activeView === "rule-review" ? (
+            <EmptyDocumentState onGoAssets={() => setActiveView("sources")} />
+          ) : null}
 
-      {canExtractRules ? (
-        <div className="action-bar">
-          <button className="primary-button" onClick={handleExtract} disabled={busy}>
-            {busy ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
-            {extractButtonLabel}
-          </button>
-        </div>
-      ) : null}
-    </main>
+          {canExtractRules ? (
+            <div className="action-bar">
+              <Button type="primary" onClick={handleExtract} disabled={busy} icon={busy ? <Loader2 className="spin" size={18} /> : <Play size={18} />}>
+                {extractButtonLabel}
+              </Button>
+            </div>
+          ) : null}
+        </Layout.Content>
+      </Layout>
+    </Layout>
   );
 }
-
 
 function RuntimeConfigPanel({
   runtimeConfig,
@@ -752,6 +759,119 @@ function ExtractionSettingsPanel({
   );
 }
 
+function LibrarySlotSettingsPanel() {
+  const [collections, setCollections] = useState<DocumentCollection[]>([]);
+  const [collectionId, setCollectionId] = useState("");
+  const [slots, setSlots] = useState<LibrarySlot[]>([]);
+  const [drafts, setDrafts] = useState<Record<string, LibrarySlot>>({});
+  const [newName, setNewName] = useState("");
+  const [newType, setNewType] = useState<SourceDocument["doc_type"]>("rulebook");
+  const [error, setError] = useState("");
+  const [savingId, setSavingId] = useState("");
+
+  useEffect(() => {
+    getCollections()
+      .then((rows) => {
+        setCollections(rows);
+        setCollectionId((current) => current || rows[0]?.id || "");
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "Unable to load workspaces"));
+  }, []);
+
+  useEffect(() => {
+    if (!collectionId) return;
+    getLibrarySlots(collectionId)
+      .then((rows) => {
+        setSlots(rows);
+        setDrafts(Object.fromEntries(rows.map((slot) => [slot.id, slot])));
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "Unable to load placeholders"));
+  }, [collectionId]);
+
+  async function refresh() {
+    const rows = await getLibrarySlots(collectionId);
+    setSlots(rows);
+    setDrafts(Object.fromEntries(rows.map((slot) => [slot.id, slot])));
+  }
+
+  async function run(id: string, action: () => Promise<unknown>) {
+    setSavingId(id);
+    setError("");
+    try {
+      await action();
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to update placeholder");
+    } finally {
+      setSavingId("");
+    }
+  }
+
+  return (
+    <section className="panel slot-settings-panel">
+      <div className="panel-title">
+        <FileText size={20} />
+        <h2>Required Document Placeholders</h2>
+      </div>
+      <p className="muted">These configurable placeholders drive the gray cards in Source Library. Custom documents remain unlimited.</p>
+      <label className="slot-collection-select">
+        Workspace
+        <select value={collectionId} onChange={(event) => setCollectionId(event.target.value)}>
+          {collections.map((collection) => <option key={collection.id} value={collection.id}>{collection.name} · {collection.id.slice(-6)}</option>)}
+        </select>
+      </label>
+      {error ? <p className="error-text">{error}</p> : null}
+      <div className="slot-settings-list">
+        {slots.map((slot) => {
+          const draft = drafts[slot.id] ?? slot;
+          return (
+            <div className="slot-settings-row" key={slot.id}>
+              <input aria-label={`Name for ${slot.name}`} value={draft.name} onChange={(event) => setDrafts({ ...drafts, [slot.id]: { ...draft, name: event.target.value } })} />
+              <select aria-label={`Role for ${slot.name}`} value={draft.doc_type} onChange={(event) => setDrafts({ ...drafts, [slot.id]: { ...draft, doc_type: event.target.value as SourceDocument["doc_type"] } })}>
+                <option value="rulebook">Rulebook</option>
+                <option value="reference_clause">Reference clause</option>
+                <option value="template">Template</option>
+                <option value="tender_submission">Tender submission</option>
+              </select>
+              <label className="slot-required-check"><input type="checkbox" checked={draft.required} onChange={(event) => setDrafts({ ...drafts, [slot.id]: { ...draft, required: event.target.checked } })} /> Required</label>
+              <Button loading={savingId === slot.id} onClick={() => run(slot.id, () => updateLibrarySlot(slot.id, { name: draft.name, doc_type: draft.doc_type, required: draft.required }))}>Save</Button>
+              <Popconfirm title={`Delete placeholder ${slot.name}?`} onConfirm={() => run(slot.id, () => deleteLibrarySlot(slot.id))}>
+                <Button danger>Delete</Button>
+              </Popconfirm>
+            </div>
+          );
+        })}
+      </div>
+      <form
+        className="slot-add-row"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!newName.trim() || !collectionId) return;
+          void run("new", () => createLibrarySlot({
+            collection_id: collectionId,
+            name: newName.trim(),
+            short_name: newName.trim().slice(0, 20),
+            description: "",
+            doc_type: newType,
+            required: false,
+            grouping_level: newType === "template" ? 3 : 2,
+            sort_order: slots.length,
+          })).then(() => setNewName(""));
+        }}
+      >
+        <input aria-label="New placeholder name" placeholder="New placeholder name" value={newName} onChange={(event) => setNewName(event.target.value)} />
+        <select aria-label="New placeholder role" value={newType} onChange={(event) => setNewType(event.target.value as SourceDocument["doc_type"])}>
+          <option value="rulebook">Rulebook</option>
+          <option value="reference_clause">Reference clause</option>
+          <option value="template">Template</option>
+          <option value="tender_submission">Tender submission</option>
+        </select>
+        <Button type="primary" htmlType="submit" loading={savingId === "new"}>Add Placeholder</Button>
+      </form>
+    </section>
+  );
+}
+
 function ProgressPanel({ documentJob, stats }: { documentJob: DocumentJob | null; stats: DocumentStats | null }) {
   const status = documentJob?.status ?? "";
   const isExtracting = status === "extracting_rules";
@@ -817,7 +937,20 @@ function ProgressPanel({ documentJob, stats }: { documentJob: DocumentJob | null
   );
 }
 
-function PhaseBadge({ status }: { status: string }) {
+function EmptyDocumentState({ onGoAssets }: { onGoAssets: () => void }) {
+  return (
+    <section className="panel empty-document-state">
+      <FileText size={34} strokeWidth={1.7} />
+      <h2>No active document selected</h2>
+      <p>Select a document in this page or import a source before opening the review workspace.</p>
+      <Button type="primary" onClick={onGoAssets} icon={<FileText size={16} />}>
+        Open Assets
+      </Button>
+    </section>
+  );
+}
+
+function PhaseBadge({ status }: { status: DocumentStatus }) {
   if (status === "mineru_queued") return <span className="phase-tag phase-queued">Waiting for MinerU to start</span>;
   if (status === "mineru_processing") return <span className="phase-tag phase-mineru">MinerU is converting PDF to Markdown</span>;
   if (status === "rule_extraction_queued") return <span className="phase-tag phase-queued">Preparing rule extraction</span>;
@@ -830,42 +963,17 @@ function PhaseBadge({ status }: { status: string }) {
   return null;
 }
 
-function TopProgressBar({ documentJob, stats }: { documentJob: DocumentJob; stats: DocumentStats | null }) {
-  const steps = ["mineru_queued","mineru_processing","markdown_ready","extracting_rules","rules_extracted"];
-  const idx = Math.max(0, steps.indexOf(documentJob.status));
-  const pct = documentJob.status.includes("failed")
-    ? 100
-    : Math.round(((idx + 1) / steps.length) * 100);
-
-  const windowsDone = stats?.llm_windows_completed ?? 0;
-  const windowsTotal = stats?.llm_windows_total ?? 0;
-  const isLLMPhase = documentJob.status === "extracting_rules";
-
-  return (
-    <section className="top-progress" aria-label="Document processing progress">
-      <div className="top-progress-meta">
-        <span>Document #{documentJob.id}</span>
-        {isLLMPhase && windowsTotal > 0 ? (
-          <span className="top-progress-windows">{windowsDone}/{windowsTotal} windows</span>
-        ) : null}
-        <span>{labelStatus(documentJob.status)}</span>
-      </div>
-      <div className={`top-progress-bar ${documentJob.status.includes("failed") ? "failed" : ""}`}>
-        <span style={{ width: `${pct}%` }} />
-      </div>
-    </section>
-  );
-}
-
 function MarkdownReview({
   documentId,
   pdfUrl,
   sections,
+  markers,
   onSectionsChange
 }: {
   documentId: number;
   pdfUrl: string;
   sections: Section[];
+  markers: DocumentMarker[];
   onSectionsChange: (sections: Section[]) => void;
 }) {
   return (
@@ -884,6 +992,7 @@ function MarkdownReview({
               key={section.id}
               documentId={documentId}
               section={section}
+              markers={markers}
               onSaved={(next) => onSectionsChange(replaceSection(sections, next))}
             />
           ))}
@@ -896,127 +1005,88 @@ function MarkdownReview({
 function SectionPreview({
   documentId,
   section,
+  markers,
   onSaved
 }: {
   documentId: number;
   section: Section;
+  markers: DocumentMarker[];
   onSaved: (section: Section) => void;
 }) {
-  const [draft, setDraft] = useState(section.content || section.title);
+  const [editing, setEditing] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(section.title);
+  const [contentDraft, setContentDraft] = useState(section.content);
   const [saving, setSaving] = useState(false);
   const paragraphLike = isClauseParagraph(section);
+  const sectionMarkers = markers.filter((marker) => marker.section_id === section.id);
+  const displayContent = paragraphLike ? (section.content || section.title) : section.content;
+  const blocks = useMemo(() => parseRichBlocks(displayContent), [displayContent]);
+  const hasRichBlocks = blocks.some((block) => block.type !== "text");
 
-  useEffect(() => setDraft(section.content || section.title), [section.content, section.title]);
+  useEffect(() => {
+    setTitleDraft(section.title);
+    setContentDraft(section.content);
+  }, [section.content, section.title]);
 
-  const debouncedSave = useCallback(
-    debounce(async (nextContent: string) => {
-      const normalized = nextContent.trim();
-      if (normalized === section.content.trim()) return;
-      setSaving(true);
-      try {
-        const saved = await saveSection(documentId, section.id, normalized);
-        onSaved(saved);
-      } finally {
-        setSaving(false);
-      }
-    }, 300),
-    [documentId, section.id, section.content, onSaved]
-  );
-
-  if (paragraphLike) {
-    return (
-      <div className={`doc-block doc-depth-${Math.min(section.level, 6)}`} data-section-id={section.id}>
-        <EditableParagraph
-          documentId={documentId}
-          value={draft}
-          saving={saving}
-          onChange={setDraft}
-          onSave={debouncedSave}
-          className="doc-clause"
-        />
-        {section.children.map((child) => (
-          <SectionPreview key={child.id} documentId={documentId} section={child} onSaved={onSaved} />
-        ))}
-      </div>
-    );
+  async function save() {
+    setSaving(true);
+    try {
+      const saved = await patchSection(documentId, section.id, {
+        title: titleDraft.trim() || section.title,
+        content: contentDraft
+      });
+      onSaved(saved);
+      setEditing(false);
+    } finally {
+      setSaving(false);
+    }
   }
 
   const HeadingTag = `h${Math.min(section.level, 4)}` as keyof JSX.IntrinsicElements;
 
   return (
     <section className={`doc-block doc-depth-${Math.min(section.level, 6)}`} data-section-id={section.id}>
-      <HeadingTag className={`doc-heading doc-heading-${Math.min(section.level, 4)}`}>
-        {section.title}
-      </HeadingTag>
-      {section.content.trim() ? (
-        <EditableParagraph
-          documentId={documentId}
-          value={draft}
-          saving={saving}
-          onChange={setDraft}
-          onSave={debouncedSave}
-          className="doc-body"
-        />
-      ) : null}
+      {editing ? (
+        <div className="section-editor">
+          <label>
+            Heading
+            <input value={titleDraft} onChange={(event) => setTitleDraft(event.target.value)} />
+          </label>
+          <label>
+            Source Markdown
+            <textarea rows={Math.min(18, Math.max(7, contentDraft.split("\n").length + 2))} value={contentDraft} onChange={(event) => setContentDraft(event.target.value)} />
+          </label>
+          <div className="section-editor-preview">
+            <span>Preview</span>
+            <HeadingTag className={`doc-heading doc-heading-${Math.min(section.level, 4)}`}>{titleDraft}</HeadingTag>
+            {contentDraft ? <div className={paragraphLike ? "doc-clause" : "doc-body"}>{renderRichBlocks(parseRichBlocks(contentDraft), documentId, sectionMarkers)}</div> : null}
+          </div>
+          <div className="section-editor-actions">
+            <Button onClick={() => { setEditing(false); setTitleDraft(section.title); setContentDraft(section.content); }}>Cancel</Button>
+            <Button type="primary" loading={saving} onClick={save} icon={<Save size={15} />}>Save Section</Button>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="section-heading-row">
+            {!paragraphLike ? (
+              <HeadingTag className={`doc-heading doc-heading-${Math.min(section.level, 4)}`}>
+                {renderInlineMarkers(section.title, sectionMarkers)}
+              </HeadingTag>
+            ) : null}
+            <Button type="text" size="small" onClick={() => setEditing(true)} icon={<Edit3 size={14} />}>Edit</Button>
+          </div>
+          {displayContent.trim() ? (
+            <div className={paragraphLike ? "doc-clause rich-content" : "doc-body rich-content"}>
+              {hasRichBlocks ? renderRichBlocks(blocks, documentId, sectionMarkers) : renderInlineMarkers(displayContent, sectionMarkers)}
+            </div>
+          ) : null}
+        </>
+      )}
       {section.children.map((child) => (
-        <SectionPreview key={child.id} documentId={documentId} section={child} onSaved={onSaved} />
+        <SectionPreview key={child.id} documentId={documentId} section={child} markers={markers} onSaved={onSaved} />
       ))}
     </section>
-  );
-}
-
-function EditableParagraph({
-  documentId,
-  value,
-  saving,
-  onChange,
-  onSave,
-  className
-}: {
-  documentId: number;
-  value: string;
-  saving: boolean;
-  onChange: (value: string) => void;
-  onSave: (value: string) => void;
-  className: string;
-}) {
-  const [editing, setEditing] = useState(false);
-  const blocks = useMemo(() => parseRichBlocks(value), [value]);
-  const hasRichBlocks = blocks.some((block) => block.type !== "text");
-
-  if (hasRichBlocks) {
-    return (
-      <div className="editable-block">
-        <div className={`${className} rich-content`}>{renderRichBlocks(blocks, documentId)}</div>
-        <span className="edit-state" aria-label={saving ? "Saving" : "Rendered"}>
-          {saving ? <Loader2 className="spin" size={14} /> : <Check size={14} />}
-        </span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="editable-block">
-      <div
-        className={className}
-        contentEditable
-        role="textbox"
-        spellCheck={false}
-        suppressContentEditableWarning
-        onFocus={() => setEditing(true)}
-        onBlur={(event) => {
-          setEditing(false);
-          const next = event.currentTarget.innerText;
-          if (next.trim() === value.trim()) return;
-          onChange(next);
-          void onSave(next);
-        }}>
-        {renderInlineReferences(value)}
-      </div>
-      <span className="edit-state" aria-label={saving ? "Saving" : editing ? "Editing" : "Editable"}>
-        {saving ? <Loader2 className="spin" size={14} /> : editing ? <Edit3 size={14} /> : <Check size={14} />}
-      </span>
-    </div>
   );
 }
 
@@ -1040,6 +1110,7 @@ function RuleMap({
   const [hoveredXrefCode, setHoveredXrefCode] = useState<string | null>(null);
   const prevRuleIdsRef = useRef<Set<string>>(new Set());
   const [newRuleIds, setNewRuleIds] = useState<Set<string>>(new Set());
+  const selectedRulePage = Number.parseInt(ruleDraft?.source.page_range?.split("-")[0] ?? "1", 10) || 1;
 
   useEffect(() => {
     const currentIds = new Set(rules.map((r) => r.id));
@@ -1092,10 +1163,10 @@ function RuleMap({
   }, [rules, filter]);
   const filteredRuleIds = useMemo(() => new Set(filteredRules.map((r) => r.id)), [filteredRules]);
 
-  const totalRules = filteredRules.length;
+  const totalRules = rules.length;
   const typeCounts: Record<string, number> = {};
   for (const t of Object.keys(RULE_TYPE_COLORS)) {
-    typeCounts[t] = filteredRules.filter((r) => r.type === t).length;
+    typeCounts[t] = rules.filter((r) => r.type === t).length;
   }
   const allRuleTypes = Object.keys(RULE_TYPE_COLORS);
 
@@ -1137,7 +1208,7 @@ function RuleMap({
     <section className="panel tall-panel">
       <div className="panel-title">
         <GitBranch size={20} />
-        <h2>Rule Logic</h2>
+        <h2>Rule Review</h2>
       </div>
       <div className="filter-row">
         {(["all", ...allRuleTypes, "low", "reviewed"] as const).map((item) => {
@@ -1157,10 +1228,10 @@ function RuleMap({
             checklist: "Verification or submission checklists",
             background: "Contextual or background information",
             low: "Confidence below 65% — needs review",
-            reviewed: "Rules marked as accepted"
+            reviewed: "Rules marked as approved"
           };
           const label = item === "all" ? "All" : item.charAt(0).toUpperCase() + item.slice(1);
-          const count = item === "all" ? totalRules : item === "low" ? filteredRules.filter((r) => r.confidence < 0.65).length : item === "reviewed" ? filteredRules.filter((r) => r.review_status === "reviewed").length : (typeCounts[item] || 0);
+          const count = item === "all" ? rules.length : item === "low" ? rules.filter((r) => r.confidence < 0.65).length : item === "reviewed" ? rules.filter((r) => r.review_status === "reviewed").length : (typeCounts[item] || 0);
           return (
             <button
               className={`filter-btn ${filter === item ? "active" : ""}`}
@@ -1179,8 +1250,8 @@ function RuleMap({
       {rules.length === 0 ? (
         <p className="muted">Rule logic will appear here after extraction.</p>
       ) : (
-        <div className="mm-workspace">
-          <div className="mm-tree-column">
+        <div className="mm-workspace review-workspace">
+          <div className="mm-tree-column review-tree-column">
             <div className="mindmap-legend">
               {allRuleTypes.map((t) => (
                 <span className="legend-item" key={t}>
@@ -1208,15 +1279,14 @@ function RuleMap({
               ))}
             </div>
           </div>
-          <div className="mm-edit-panel">
+          <div className="mm-edit-panel review-inspector-panel">
             {selectedRule && ruleDraft ? (
               <>
-                <div className="mm-edit-panel-header">
+                <div className="mm-edit-panel-header review-inspector-header">
                   <div>
-                    <span className="mm-rule-type" style={{ background: RULE_TYPE_COLORS[ruleDraft.type] || "#6b7280", fontSize: 11 }}>{ruleDraft.type}</span>
-                    <span style={{ marginLeft: 8, fontSize: 13, color: "#64748b" }}>
-                      {Math.round(ruleDraft.confidence * 100)}% confidence
-                    </span>
+                    <ReviewTypeChip label={ruleDraft.type} color={RULE_TYPE_COLORS[ruleDraft.type] || "#6b7280"} />
+                    <ReviewStatusBadge status={ruleDraft.review_status} />
+                    <ReviewConfidence value={ruleDraft.confidence} />
                   </div>
                   <button className="toast-dismiss" onClick={closeEditPanel} type="button" aria-label="Close editor">
                     <X size={18} />
@@ -1225,11 +1295,11 @@ function RuleMap({
 
                 {/* Review status banner */}
                 {ruleDraft.review_status === "reviewed" ? (
-                  <div className="review-banner approved">✓ This rule has been accepted</div>
+                  <div className="review-banner approved">This rule has been approved</div>
                 ) : ruleDraft.review_status === "rejected" ? (
-                  <div className="review-banner rejected">✗ This rule has been rejected</div>
+                  <div className="review-banner rejected">This rule has been rejected</div>
                 ) : (
-                  <div className="review-banner draft">⚑ This rule needs review</div>
+                  <div className="review-banner draft">This rule needs review</div>
                 )}
 
                 {/* Breadcrumb */}
@@ -1244,6 +1314,10 @@ function RuleMap({
                   <details className="mm-edit-evidence">
                     <summary>Source evidence</summary>
                     <p>{ruleDraft.source.evidence_text}</p>
+                    <a href={`/api/documents/${documentId}/source-pdf#page=${selectedRulePage}`} target="_blank" rel="noreferrer">
+                      Open cited PDF page {selectedRulePage}
+                    </a>
+                    <iframe className="rule-evidence-pdf" title="Rule PDF evidence" src={`/api/documents/${documentId}/source-pdf#page=${selectedRulePage}`} />
                   </details>
                 ) : null}
 
@@ -1305,7 +1379,7 @@ function RuleMap({
                   {/* Dependencies */}
                   {ruleDraft.dependencies.length > 0 ? (
                     <div className="mm-edit-section">
-                      <span className="mm-detail-label">Depends on</span>
+                      <span className="mm-detail-label">Depends On</span>
                       <span className="mm-detail-value">
                         {ruleDraft.dependencies.map((d, i) => (
                           <span key={i} className="mm-dep">{d.type}: {d.reason || d.rule_id}</span>
@@ -1325,7 +1399,7 @@ function RuleMap({
                       onClick={() => handleReviewAction("reviewed")}
                     >
                       <CheckCircle2 size={16} />
-                      Accept
+                      Approve
                     </button>
                     <button
                       type="button"
@@ -1362,7 +1436,7 @@ function RuleMap({
                 </div>
               </>
             ) : (
-              <div className="mm-edit-empty">
+              <div className="mm-edit-empty review-inspector-empty">
                 <Edit3 size={36} strokeWidth={1.5} />
                 <p>Select a rule to edit</p>
                 <p className="mm-edit-empty-hint">Click the edit icon on any rule in the tree to open it here.</p>
@@ -1387,7 +1461,7 @@ const RULE_TYPE_COLORS: Record<string, string> = {
   background: "#9ca3af",
 };
 
-function MindmapSectionNode({
+const MindmapSectionNode = memo(function MindmapSectionNode({
   section,
   sectionById,
   sectionByCode,
@@ -1428,6 +1502,7 @@ function MindmapSectionNode({
         onClick={() => hasChildren && setExpanded(!expanded)}
         role={hasChildren ? "button" : undefined}
         tabIndex={hasChildren ? 0 : undefined}
+        aria-expanded={hasChildren ? expanded : undefined}
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setExpanded(!expanded); } }}
       >
         <span className={`mm-toggle ${expanded ? "open" : ""}`}>
@@ -1477,9 +1552,9 @@ function MindmapSectionNode({
       )}
     </div>
   );
-}
+});
 
-function MindmapRuleNode({
+const MindmapRuleNode = memo(function MindmapRuleNode({
   rule,
   sectionById,
   sectionByCode,
@@ -1517,29 +1592,29 @@ function MindmapRuleNode({
   return (
     <div className={`mm-rule-node ${isNew ? "mm-rule-node--new" : ""} ${isSelected ? "mm-rule-node--selected" : ""} ${hasActiveXref ? "has-active-xref" : ""}`}>
       <div
-        className="mm-rule-header clickable"
+        className="mm-rule-header clickable review-item-row"
         onClick={() => onSelectRule(rule)}
         role="button"
         tabIndex={0}
+        aria-expanded={expanded}
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelectRule(rule); } }}
       >
         <span
           className={`mm-toggle small ${expanded ? "open" : ""}`}
           onClick={(e) => { e.stopPropagation(); hasDetails && setExpanded(!expanded); }}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); hasDetails && setExpanded(!expanded); } }}
+          tabIndex={0}
+          role="button"
+          aria-expanded={expanded}
+          aria-label={expanded ? "Collapse rule details" : "Expand rule details"}
           title={hasDetails ? "Toggle details" : undefined}
         >
           {hasDetails ? (expanded ? "▾" : "▸") : "·"}
         </span>
-        <span className="mm-rule-status-pill" style={{
-          background: rule.review_status === "reviewed" ? "#f0fdf4" : rule.review_status === "rejected" ? "#fef2f2" : "#fffbeb",
-          color: rule.review_status === "reviewed" ? "#16a34a" : rule.review_status === "rejected" ? "#dc2626" : "#d97706",
-          borderColor: rule.review_status === "reviewed" ? "#bbf7d0" : rule.review_status === "rejected" ? "#fecaca" : "#fde68a"
-        }}>
-          {rule.review_status === "reviewed" ? "OK" : rule.review_status === "rejected" ? "NO" : "..."}
-        </span>
-        <span className="mm-rule-type" style={{ background: typeColor }}>{rule.type}</span>
+        <ReviewStatusBadge status={rule.review_status} />
+        <ReviewTypeChip label={rule.type} color={typeColor} />
         <span className="mm-rule-subject">{rule.subject || rule.action || rule.id}</span>
-        <span className="mm-confidence">{Math.round(rule.confidence * 100)}%</span>
+        <ReviewConfidence value={rule.confidence} />
         <button
           className="mm-rule-edit-btn"
           type="button"
@@ -1618,7 +1693,7 @@ function MindmapRuleNode({
           )}
           {rule.dependencies.length > 0 && (
             <div className="mm-detail-row">
-              <span className="mm-detail-label">Depends on</span>
+              <span className="mm-detail-label">Depends On</span>
               <span className="mm-detail-value">
                 {rule.dependencies.map((d, i) => (
                   <span key={i} className="mm-dep">{d.type}: {d.reason || d.rule_id}</span>
@@ -1628,7 +1703,7 @@ function MindmapRuleNode({
           )}
           {relatedEdges.length > 0 && (
             <div className="mm-detail-row">
-              <span className="mm-detail-label">Graph edges</span>
+              <span className="mm-detail-label">Graph Edges</span>
               <span className="mm-detail-value">
                 {relatedEdges.map((e, i) => (
                   <span key={i} className="mm-edge">
@@ -1642,9 +1717,9 @@ function MindmapRuleNode({
       )}
     </div>
   );
-}
+});
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status }: { status: DocumentStatus }) {
   return <span className={`status-badge status-${status}`}>{labelStatus(status)}</span>;
 }
 
@@ -1663,7 +1738,7 @@ function StatsGrid({ stats, status }: { stats: DocumentStats | null; status?: st
   );
 }
 
-function visibleStats(stats: DocumentStats | null, status?: string): [string, string | number][] {
+function visibleStats(stats: DocumentStats | null, status?: DocumentStatus): [string, string | number][] {
   if (!stats) return [];
   if (status === "mineru_queued" || status === "mineru_processing") return [];
   if (status === "mineru_failed" || status === "rule_extraction_failed" || status === "rule_extraction_queued") return [];
@@ -1688,7 +1763,7 @@ function visibleStats(stats: DocumentStats | null, status?: string): [string, st
     ["Options", stats.option_rules],
     ["Links", stats.dependency_links]
   ];
-  if (stats.low_confidence_rules > 0) all.push(["Low confidence", stats.low_confidence_rules]);
+  if (stats.low_confidence_rules > 0) all.push(["Low Confidence", stats.low_confidence_rules]);
   all.push(["Reviewed", stats.reviewed_rules]);
   all.push(["Draft", stats.draft_rules]);
   if (stats.rejected_rules > 0) all.push(["Rejected", stats.rejected_rules]);
@@ -1709,40 +1784,82 @@ function ExportPanel({ documentId, kinds }: { documentId: number; kinds: string[
   );
 }
 
-function labelStatus(status: string) {
-  const labels: Record<string, string> = {
-    idle: "idle",
-    created: "created",
-    mineru_queued: "PDF queued",
-    mineru_processing: "converting PDF",
-    markdown_ready: "text ready",
-    rule_extraction_queued: "extracting rules",
-    extracting_rules: "extracting rules",
-    rules_extracted: "rules extracted",
-    rule_extraction_failed: "rule extraction failed",
-    mineru_failed: "PDF conversion failed",
-    evidence_extracted: "evidence extracted",
-    checked: "checked",
-  };
-  return labels[status] ?? status.replaceAll("_", " ");
+function sourceForDocument(documentId: number, sourceDocuments: SourceDocument[]) {
+  return sourceDocuments.find((source) => source.linked_document_id === documentId) ?? null;
 }
 
-function defaultViewForStatus(status: string): View {
-  if (status === "markdown_ready") return "review";
-  if (["rule_extraction_queued", "extracting_rules"].includes(status)) return "processing";
-  if (["rules_extracted", "rule_extraction_failed"].includes(status)) return "map";
-  return "processing";
+function canExtractRulesForSource(source: SourceDocument | null) {
+  if (!source) return true;
+  return source.doc_type === "rulebook" || source.doc_type === "reference_clause";
+}
+
+function displayStatusForDocument(document: DocumentJob, source: SourceDocument | null) {
+  if (!source) return document.status;
+  if (source.status === "rules_verified" || source.status === "fields_verified") return source.status;
+  if (source.doc_type === "template") {
+    if (source.status === "fields_extracted" || source.status === "fields_verified") {
+      return source.status;
+    }
+    if (document.status === "mineru_queued" || document.status === "mineru_processing" || document.status === "mineru_failed") {
+      return document.status;
+    }
+    if (document.status === "markdown_ready") return "markdown_ready";
+    return source.status;
+  }
+  return document.status;
 }
 
 function viewLabel(view: View) {
   const labels: Record<View, string> = {
-    workflow: "Workflow",
-    processing: "Progress",
-    review: "Document Review",
-    map: "Rule Logic",
-    config: "Settings"
+    dashboard: "Dashboard",
+    sources: "Sources",
+    queue: "Queue",
+    "document-review": "Document Review",
+    "rule-review": "Rule Review",
+    "field-review": "Field Review",
+    "mapping-review": "Mapping Review",
+    submissions: "Submissions",
+    results: "Results",
+    activity: "Activity",
+    settings: "Settings"
   };
   return labels[view];
+}
+
+function viewFromPath(pathname: string): { view: View; sourceId: string | null } {
+  const documentRoute = pathname.match(/^\/documents\/([^/]+)\/(review|rules|fields)$/);
+  if (documentRoute) {
+    const view = documentRoute[2] === "review" ? "document-review" : documentRoute[2] === "rules" ? "rule-review" : "field-review";
+    return { view, sourceId: decodeURIComponent(documentRoute[1]) };
+  }
+  const routes: Record<string, View> = {
+    "/dashboard": "dashboard",
+    "/sources": "sources",
+    "/queue": "queue",
+    "/mappings": "mapping-review",
+    "/submissions": "submissions",
+    "/results": "results",
+    "/activity": "activity",
+    "/settings": "settings",
+  };
+  return { view: routes[pathname] ?? "dashboard", sourceId: null };
+}
+
+function routeForView(view: View, sourceId: string | null) {
+  if (view === "document-review") return sourceId ? `/documents/${encodeURIComponent(sourceId)}/review` : "/documents/review";
+  if (view === "rule-review") return sourceId ? `/documents/${encodeURIComponent(sourceId)}/rules` : "/documents/rules";
+  if (view === "field-review") return sourceId ? `/documents/${encodeURIComponent(sourceId)}/fields` : "/documents/fields";
+  const routes: Record<Exclude<View, "document-review" | "rule-review" | "field-review">, string> = {
+    dashboard: "/dashboard",
+    sources: "/sources",
+    queue: "/queue",
+    "mapping-review": "/mappings",
+    submissions: "/submissions",
+    results: "/results",
+    activity: "/activity",
+    settings: "/settings",
+  };
+  return routes[view];
 }
 
 function exportLabel(kind: string) {
@@ -1754,7 +1871,7 @@ function exportLabel(kind: string) {
     "rules-json": "Rules JSON",
     "rules-csv": "Rules CSV",
     "llm-windows": "LLM Windows",
-    "rule-graph": "Rule Logic JSON",
+    "rule-graph": "Rule Review JSON",
   };
   return labels[kind] ?? kind.split("-").map((p) => p.charAt(0).toUpperCase() + p.slice(1)).join(" ");
 }
@@ -1766,18 +1883,55 @@ function isClauseParagraph(section: Section) {
   return hasLongNumberedLead || hasClauseContent;
 }
 
-function renderInlineReferences(value: string) {
-  const parts = value.split(/((?:Section\s+)?(?:[A-Z]\d+|\d+)(?:\.\d+){1,4})/g);
-  return parts.map((part, index) => {
-    if (/^(?:Section\s+)?(?:[A-Z]\d+|\d+)(?:\.\d+){1,4}$/.test(part)) {
-      return (
-        <mark className="xref" key={`${part}-${index}`}>
-          {part}
-        </mark>
-      );
+function renderInlineMarkers(value: string, markers: DocumentMarker[] = []) {
+  const uniqueMarkers = [...new Map(
+    markers
+      .filter((marker) => marker.text && value.includes(marker.text))
+      .sort((a, b) => b.text.length - a.text.length)
+      .map((marker) => [marker.text, marker])
+  ).values()];
+
+  if (!uniqueMarkers.length) {
+    const parts = value.split(/((?:Section\s+)?(?:[A-Z]\d+|\d+)(?:\.\d+){1,4})/g);
+    return parts.map((part, index) => {
+      if (/^(?:Section\s+)?(?:[A-Z]\d+|\d+)(?:\.\d+){1,4}$/.test(part)) {
+        return (
+          <mark className="xref marker-yellow" key={`${part}-${index}`}>
+            {part}
+          </mark>
+        );
+      }
+      return part;
+    });
+  }
+
+  const tokens: ReactNode[] = [];
+  let cursor = 0;
+  while (cursor < value.length) {
+    let next: { marker: DocumentMarker; index: number } | null = null;
+    for (const marker of uniqueMarkers) {
+      const index = value.indexOf(marker.text, cursor);
+      if (index < 0) continue;
+      if (!next || index < next.index || (index === next.index && marker.text.length > next.marker.text.length)) {
+        next = { marker, index };
+      }
     }
-    return part;
-  });
+    if (!next) {
+      tokens.push(value.slice(cursor));
+      break;
+    }
+    if (next.index > cursor) tokens.push(value.slice(cursor, next.index));
+    tokens.push(
+      <mark
+        className={`xref marker-${next.marker.color}`}
+        key={`${next.marker.section_id}-${next.index}-${next.marker.text}`}
+      >
+        {next.marker.text}
+      </mark>
+    );
+    cursor = next.index + next.marker.text.length;
+  }
+  return tokens;
 }
 
 type RichBlock =
@@ -1819,7 +1973,7 @@ function parseRichBlocks(value: string): RichBlock[] {
   return blocks.length ? blocks : [{ type: "text", value }];
 }
 
-function renderRichBlocks(blocks: RichBlock[], documentId: number) {
+function renderRichBlocks(blocks: RichBlock[], documentId: number, markers: DocumentMarker[]) {
   return blocks.map((block, index) => {
     if (block.type === "media") {
       const src = `/storage/documents/${documentId}/mineru/${block.path}`;
@@ -1843,18 +1997,18 @@ function renderRichBlocks(blocks: RichBlock[], documentId: number) {
         </details>
       );
     }
-    return renderTextParagraphs(block.value, index);
+    return renderTextParagraphs(block.value, index, markers);
   });
 }
 
-function renderTextParagraphs(value: string, keyPrefix: number) {
+function renderTextParagraphs(value: string, keyPrefix: number, markers: DocumentMarker[] = []) {
   return value
     .split(/\n{2,}/)
     .map((part) => part.trim())
     .filter(Boolean)
     .map((part, index) => (
       <p className="rich-paragraph" key={`text-${keyPrefix}-${index}`}>
-        {renderInlineReferences(part)}
+        {renderInlineMarkers(part, markers)}
       </p>
     ));
 }
@@ -1902,10 +2056,13 @@ function renderMarkdownTable(markdown: string) {
 }
 
 function sanitizeTableHtml(html: string) {
-  return html
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/\s+on[a-z]+\s*=\s*"[^"]*"/gi, "")
-    .replace(/\s+on[a-z]+\s*=\s*'[^']*'/gi, "");
+  return DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ["table", "thead", "tbody", "tfoot", "tr", "th", "td",
+      "caption", "colgroup", "col", "br", "p", "span", "strong", "em",
+      "b", "i", "u", "sup", "sub", "a", "img", "div"],
+    ALLOWED_ATTR: ["colspan", "rowspan", "style", "class", "align",
+      "valign", "scope", "href", "src", "alt", "width", "height"],
+  });
 }
 
 function flattenSections(sections: Section[]): Section[] {

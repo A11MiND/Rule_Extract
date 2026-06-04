@@ -36,16 +36,53 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
 
-    # Add grouping_level column to existing SQLite databases
+    # Keep the local demo database forward-compatible without destroying extracted data.
     if settings.database_url.startswith("sqlite"):
         import sqlite3
         db_path = settings.database_url.replace("sqlite:///", "")
         try:
             conn = sqlite3.connect(db_path)
-            cols = [row[1] for row in conn.execute("PRAGMA table_info(documents)").fetchall()]
-            if "grouping_level" not in cols:
-                conn.execute("ALTER TABLE documents ADD COLUMN grouping_level INTEGER NOT NULL DEFAULT 2")
-                conn.commit()
+            upgrades = {
+                "documents": {
+                    "grouping_level": "INTEGER NOT NULL DEFAULT 2",
+                },
+                "sections": {
+                    "page_range": "VARCHAR(64)",
+                    "coordinates": "JSON NOT NULL DEFAULT '[]'",
+                },
+                "rules": {
+                    "severity": "VARCHAR(32) NOT NULL DEFAULT 'recommended'",
+                    "applicability": "JSON NOT NULL DEFAULT '{}'",
+                    "evidence_requirements": "JSON NOT NULL DEFAULT '[]'",
+                    "validation_method": "VARCHAR(32) NOT NULL DEFAULT 'llm_judgement'",
+                    "references": "JSON NOT NULL DEFAULT '[]'",
+                    "mapping_status": "VARCHAR(32) NOT NULL DEFAULT 'unmapped'",
+                },
+                "source_documents": {
+                    "slot_id": "TEXT",
+                    "description": "TEXT NOT NULL DEFAULT ''",
+                    "text_review_status": "VARCHAR(32) NOT NULL DEFAULT 'pending'",
+                    "text_verified_at": "DATETIME",
+                    "content_fingerprint": "TEXT NOT NULL DEFAULT ''",
+                },
+                "template_fields": {
+                    "part_ref": "TEXT NOT NULL DEFAULT ''",
+                    "filled_by": "VARCHAR(64) NOT NULL DEFAULT 'unknown'",
+                    "confidence": "FLOAT NOT NULL DEFAULT 0.0",
+                    "rationale": "TEXT NOT NULL DEFAULT ''",
+                    "source_window": "JSON NOT NULL DEFAULT '{}'",
+                    "check_intent": "TEXT NOT NULL DEFAULT ''",
+                    "structured_schema": "JSON NOT NULL DEFAULT '{}'",
+                    "normalization": "JSON NOT NULL DEFAULT '{}'",
+                    "evidence_locator": "JSON NOT NULL DEFAULT '{}'",
+                },
+            }
+            for table, columns in upgrades.items():
+                existing = [row[1] for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()]
+                for name, definition in columns.items():
+                    if existing and name not in existing:
+                        conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{name}" {definition}')
+            conn.commit()
             conn.close()
         except Exception:
             pass

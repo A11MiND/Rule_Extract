@@ -13,16 +13,19 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
-    "vite": "latest",
-    "typescript": "latest",
+    "antd": "^6.4.3",
+    "dompurify": "^3.4.7",
+    "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "lucide-react": "latest"
+    "typescript": "latest",
+    "vite": "latest"
   },
   "devDependencies": {
-    "vitest": "latest",
-    "@testing-library/react": "latest",
     "@testing-library/jest-dom": "latest",
-    "jsdom": "latest"
+    "@testing-library/react": "latest",
+    "@types/dompurify": "^3.0.5",
+    "jsdom": "latest",
+    "vitest": "latest"
   }
 }

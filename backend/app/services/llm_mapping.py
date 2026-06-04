@@ -26,12 +26,48 @@ Rules:
 """
 
 
-def suggest_field_rule_mappings(db: Session, collection_id: str) -> dict[str, int]:
-    fields = db.query(models.TemplateField).filter(models.TemplateField.collection_id == collection_id).all()
-    rules = db.query(models.Rule).all()
+def suggest_field_rule_mappings(
+    db: Session,
+    collection_id: str,
+    *,
+    template_source_ids: list[str] | None = None,
+    rule_source_ids: list[str] | None = None,
+) -> dict[str, int]:
+    template_source_ids = template_source_ids or []
+    rule_source_ids = rule_source_ids or []
+    fields = (
+        db.query(models.TemplateField)
+        .filter(
+            models.TemplateField.collection_id == collection_id,
+            models.TemplateField.review_status == "approved",
+        )
+    )
+    if template_source_ids:
+        fields = fields.filter(models.TemplateField.source_document_id.in_(template_source_ids))
+    fields = fields.all()
+    verified_sources = (
+        db.query(models.SourceDocument)
+        .filter(
+            models.SourceDocument.collection_id == collection_id,
+            models.SourceDocument.doc_type.in_(["rulebook", "reference_clause"]),
+            models.SourceDocument.status == "rules_verified",
+            models.SourceDocument.linked_document_id.isnot(None),
+        )
+    )
+    if rule_source_ids:
+        verified_sources = verified_sources.filter(models.SourceDocument.id.in_(rule_source_ids))
+    verified_sources = verified_sources.all()
+    verified_document_ids = [source.linked_document_id for source in verified_sources if source.linked_document_id]
+    rules = (
+        db.query(models.Rule)
+        .filter(models.Rule.document_id.in_(verified_document_ids))
+        .all()
+        if verified_document_ids
+        else []
+    )
     created = 0
     for field in fields:
-        candidates = pre_filter_candidates(field, rules, limit=20)
+        candidates = pre_filter_candidates(field, rules, limit=30)
         if not candidates:
             continue
         ranked = llm_rank_mappings(field, candidates)

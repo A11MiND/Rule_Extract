@@ -80,6 +80,8 @@ class SectionRead(BaseModel):
     title: str
     heading_path: list[str]
     content: str
+    page_range: str | None = None
+    coordinates: list[dict[str, Any]] = Field(default_factory=list)
     classification: str | None = None
     classification_confidence: float | None = None
     children: list["SectionRead"] = Field(default_factory=list)
@@ -87,6 +89,11 @@ class SectionRead(BaseModel):
 
 class SectionUpdate(BaseModel):
     content: str
+
+
+class SectionPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    content: str | None = None
 
 
 class RuleOption(BaseModel):
@@ -120,6 +127,12 @@ class RuleBase(BaseModel):
     actor: str | None = None
     target: str | None = None
     deadline: str | None = None
+    severity: str = "recommended"
+    applicability: dict[str, Any] = Field(default_factory=dict)
+    evidence_requirements: list[dict[str, Any]] = Field(default_factory=list)
+    validation_method: str = "llm_judgement"
+    references: list[dict[str, Any]] = Field(default_factory=list)
+    mapping_status: str = "unmapped"
     options: list[RuleOption] = Field(default_factory=list)
     dependencies: list[RuleDependency] = Field(default_factory=list)
     next_rule_ids: list[str] = Field(default_factory=list)
@@ -203,6 +216,8 @@ class SourceDocumentCreate(BaseModel):
     collection_id: str
     doc_type: Literal["rulebook", "reference_clause", "template", "tender_submission"]
     name: str = Field(min_length=1)
+    slot_id: str | None = None
+    description: str = ""
     pdf_url: str = ""
     linked_document_id: int | None = None
 
@@ -212,6 +227,9 @@ class SourceDocumentRead(SourceDocumentCreate):
 
     id: str
     status: str
+    text_review_status: str = "pending"
+    text_verified_at: datetime | None = None
+    content_fingerprint: str = ""
     mineru_artifacts: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -228,6 +246,15 @@ class TemplateFieldCreate(BaseModel):
     required: bool = True
     section_ref: str | None = None
     extraction_hint: str = ""
+    check_intent: str = ""
+    structured_schema: dict[str, Any] = Field(default_factory=dict)
+    normalization: dict[str, Any] = Field(default_factory=dict)
+    evidence_locator: dict[str, Any] = Field(default_factory=dict)
+    part_ref: str = ""
+    filled_by: str = "unknown"
+    confidence: float = Field(default=0.0, ge=0, le=1)
+    rationale: str = ""
+    source_window: dict[str, Any] = Field(default_factory=dict)
     review_status: Literal["suggested", "approved", "rejected", "needs_edit"] = "suggested"
 
 
@@ -238,6 +265,15 @@ class TemplateFieldUpdate(BaseModel):
     required: bool | None = None
     section_ref: str | None = None
     extraction_hint: str | None = None
+    check_intent: str | None = None
+    structured_schema: dict[str, Any] | None = None
+    normalization: dict[str, Any] | None = None
+    evidence_locator: dict[str, Any] | None = None
+    part_ref: str | None = None
+    filled_by: str | None = None
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    rationale: str | None = None
+    source_window: dict[str, Any] | None = None
     review_status: Literal["suggested", "approved", "rejected", "needs_edit"] | None = None
 
 
@@ -252,6 +288,25 @@ class TemplateFieldRead(TemplateFieldCreate):
 class ExtractFieldsResponse(BaseModel):
     document_id: str
     fields_created: int
+
+
+class TemplateFieldBulkReview(BaseModel):
+    field_ids: list[str] = Field(default_factory=list)
+    review_status: Literal["suggested", "approved", "rejected", "needs_edit"]
+
+
+class RuleBulkReview(BaseModel):
+    review_status: Literal["draft", "reviewed", "rejected"]
+
+
+class DocumentMarkerRead(BaseModel):
+    section_id: str
+    marker_type: str
+    text: str
+    start: int
+    end: int
+    color: Literal["yellow", "blue"]
+    confidence: float = Field(default=1.0, ge=0, le=1)
 
 
 class FieldRuleMappingCreate(BaseModel):
@@ -288,6 +343,8 @@ class FieldRuleMappingRead(FieldRuleMappingCreate):
 
 class MappingRunCreate(BaseModel):
     collection_id: str
+    template_source_ids: list[str] = Field(default_factory=list)
+    rule_source_ids: list[str] = Field(default_factory=list)
 
 
 class MappingRunRead(BaseModel):
@@ -360,3 +417,104 @@ class CheckResultRead(BaseModel):
 class RunChecksResponse(BaseModel):
     submission_id: str
     results_created: int
+
+
+class LibrarySlotCreate(BaseModel):
+    collection_id: str
+    name: str = Field(min_length=1, max_length=255)
+    short_name: str = Field(default="", max_length=80)
+    description: str = ""
+    doc_type: Literal["rulebook", "reference_clause", "template", "tender_submission"] = "rulebook"
+    required: bool = False
+    grouping_level: int = Field(default=2, ge=1, le=3)
+    sort_order: int = 0
+
+
+class LibrarySlotUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    short_name: str | None = Field(default=None, max_length=80)
+    description: str | None = None
+    doc_type: Literal["rulebook", "reference_clause", "template", "tender_submission"] | None = None
+    required: bool | None = None
+    grouping_level: int | None = Field(default=None, ge=1, le=3)
+    sort_order: int | None = None
+
+
+class LibrarySlotRead(LibrarySlotCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class SourceDocumentUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
+    doc_type: Literal["rulebook", "reference_clause", "template", "tender_submission"] | None = None
+    slot_id: str | None = None
+
+
+class SourceImportUrl(BaseModel):
+    collection_id: str
+    name: str = Field(min_length=1, max_length=255)
+    doc_type: Literal["rulebook", "reference_clause", "template", "tender_submission"]
+    pdf_url: HttpUrl
+    description: str = ""
+    slot_id: str | None = None
+    grouping_level: int = Field(default=2, ge=1, le=3)
+
+
+class FieldRuleMappingCreateRequest(FieldRuleMappingCreate):
+    pass
+
+
+class ProcedureSetCreate(BaseModel):
+    collection_id: str
+    name: str = Field(min_length=1, max_length=255)
+    template_source_ids: list[str] = Field(default_factory=list)
+    rule_source_ids: list[str] = Field(default_factory=list)
+    mapping_ids: list[str] = Field(default_factory=list)
+
+
+class ProcedureSetUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    template_source_ids: list[str] | None = None
+    rule_source_ids: list[str] | None = None
+    mapping_ids: list[str] | None = None
+
+
+class ProcedureSetRead(ProcedureSetCreate):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    version: int
+    status: str
+    parent_id: str | None = None
+    approved_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class AuditEventRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    actor: str
+    action: str
+    entity_type: str
+    entity_id: str
+    summary: str
+    before_json: dict[str, Any] = Field(default_factory=dict)
+    after_json: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime | None = None
+
+
+class DashboardSummary(BaseModel):
+    total_documents: int = 0
+    awaiting_text_review: int = 0
+    awaiting_record_review: int = 0
+    processing: int = 0
+    failed: int = 0
+    approved_procedure_sets: int = 0
+    recent_activity: list[AuditEventRead] = Field(default_factory=list)

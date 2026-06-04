@@ -49,6 +49,8 @@ class Section(Base):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     heading_path: Mapped[list[str]] = mapped_column(JsonType, nullable=False, default=list)
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    page_range: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    coordinates: Mapped[list[dict]] = mapped_column(JsonType, nullable=False, default=list)
     classification: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     classification_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
@@ -69,6 +71,12 @@ class Rule(Base):
     actor: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     target: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     deadline: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False, default="recommended")
+    applicability: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)
+    evidence_requirements: Mapped[list[dict]] = mapped_column(JsonType, nullable=False, default=list)
+    validation_method: Mapped[str] = mapped_column(String(32), nullable=False, default="llm_judgement")
+    references: Mapped[list[dict]] = mapped_column(JsonType, nullable=False, default=list)
+    mapping_status: Mapped[str] = mapped_column(String(32), nullable=False, default="unmapped")
     options: Mapped[list[dict]] = mapped_column(JsonType, nullable=False, default=list)
     dependencies: Mapped[list[dict]] = mapped_column(JsonType, nullable=False, default=list)
     next_rule_ids: Mapped[list[str]] = mapped_column(JsonType, nullable=False, default=list)
@@ -114,6 +122,34 @@ class DocumentCollection(Base):
     tender_submissions: Mapped[list["TenderSubmission"]] = relationship(
         back_populates="collection", cascade="all, delete-orphan"
     )
+    library_slots: Mapped[list["LibrarySlot"]] = relationship(
+        back_populates="collection", cascade="all, delete-orphan"
+    )
+    procedure_sets: Mapped[list["VettingProcedureSet"]] = relationship(
+        back_populates="collection", cascade="all, delete-orphan"
+    )
+
+
+class LibrarySlot(Base):
+    __tablename__ = "library_slots"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("document_collections.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    short_name: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    doc_type: Mapped[str] = mapped_column(String(32), nullable=False, default="rulebook", index=True)
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    grouping_level: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    collection: Mapped[DocumentCollection] = relationship(back_populates="library_slots")
 
 
 class SourceDocument(Base):
@@ -123,10 +159,17 @@ class SourceDocument(Base):
     collection_id: Mapped[str] = mapped_column(
         ForeignKey("document_collections.id", ondelete="CASCADE"), index=True
     )
+    slot_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("library_slots.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     doc_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, default="")
     pdf_url: Mapped[str] = mapped_column(Text, nullable=False, default="")
     status: Mapped[str] = mapped_column(String(64), nullable=False, default="created", index=True)
+    text_review_status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", index=True)
+    text_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    content_fingerprint: Mapped[str] = mapped_column(Text, nullable=False, default="")
     mineru_artifacts: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)
     linked_document_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
 
@@ -159,6 +202,15 @@ class TemplateField(Base):
     required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     section_ref: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     extraction_hint: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    check_intent: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    structured_schema: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)
+    normalization: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)
+    evidence_locator: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)
+    part_ref: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    filled_by: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    source_window: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)
     review_status: Mapped[str] = mapped_column(String(32), nullable=False, default="suggested", index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -201,6 +253,43 @@ class FieldRuleMapping(Base):
 
     collection: Mapped[DocumentCollection] = relationship(back_populates="field_rule_mappings")
     template_field: Mapped[TemplateField] = relationship(back_populates="mappings")
+
+
+class VettingProcedureSet(Base):
+    __tablename__ = "vetting_procedure_sets"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    collection_id: Mapped[str] = mapped_column(
+        ForeignKey("document_collections.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="draft", index=True)
+    template_source_ids: Mapped[list[str]] = mapped_column(JsonType, nullable=False, default=list)
+    rule_source_ids: Mapped[list[str]] = mapped_column(JsonType, nullable=False, default=list)
+    mapping_ids: Mapped[list[str]] = mapped_column(JsonType, nullable=False, default=list)
+    parent_id: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    approved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    collection: Mapped[DocumentCollection] = relationship(back_populates="procedure_sets")
+
+
+class AuditEvent(Base):
+    __tablename__ = "audit_events"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    actor: Mapped[str] = mapped_column(String(80), nullable=False, default="Demo User", index=True)
+    action: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    entity_type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    entity_id: Mapped[str] = mapped_column(Text, nullable=False, default="", index=True)
+    summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    before_json: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)
+    after_json: Mapped[dict] = mapped_column(JsonType, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class MappingRun(Base):

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 330 105" role="img" aria-labelledby="title">
+  <title id="title">Hong Kong Productivity Council</title>
+  <g fill="#2f6db6">
+    <path d="M10 14 24 4l9 14-15 8z"/><path d="m29 3 16 4-5 16-14-5z"/>
+    <path d="m48 9 12 13-13 10-10-12z"/><path d="m5 33 17-4 3 15-17 4z"/>
+    <path d="m29 27 16-1 1 16-16 1z"/><path d="m50 35 14 8-8 14-13-8z"/>
+    <path d="m8 54 16-5 5 15-17 6z"/><path d="m31 50 16-1 2 16-16 2z"/>
+    <path d="m18 72 14-7 8 14-14 8z"/>
+  </g>
+  <path fill="#2c63ad" d="M74 24h14v65H74zM88 52c8-10 16-15 27-15 19 0 28 13 28 34v18h-15V72c0-14-5-22-16-22-13 0-24 12-24 28z"/>
+  <path fill="#2165ad" d="M146 24h15v34l25-20h20l-31 24 32 27h-21l-25-23v23h-15z"/>
+  <path fill="#178a77" d="M207 38h15v8c6-7 14-10 23-10 20 0 35 15 35 27s-15 28-35 28c-9 0-17-3-23-10v22h-15zm36 12c-12 0-21 7-21 14s9 14 21 14 21-7 21-14-9-14-21-14z"/>
+  <path fill="#2cb79c" d="M294 45a28 28 0 1 0 0 38l-10-10a14 14 0 1 1 0-18z"/>
+  <text x="213" y="103" fill="#4d5b61" font-family="Arial, sans-serif" font-size="15" letter-spacing="4">生產力局</text>
+</svg>

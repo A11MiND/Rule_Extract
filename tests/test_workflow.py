@@ -11,11 +11,43 @@ from sqlalchemy.pool import StaticPool
 from backend.app import main, models, schemas
 from backend.app.database import Base
 from backend.app.routers import workflow
+from backend.app.services.audit import model_snapshot
 from backend.app.services.llm import LLMClient
 
 
 def _fake_complete_json(self: LLMClient, system_prompt: str, user_prompt: str) -> dict[str, Any]:
     """Stubbed LLM used by tests: returns deterministic JSON per call site."""
+    if "reviewable tender-template fields" in system_prompt:
+        return {
+            "fields": [
+                {
+                    "field_key": "cdp1.main_option",
+                    "label": "Selected main Option",
+                    "part_ref": "A4.2 Option Selection",
+                    "filled_by": "project_office",
+                    "anchor_text": "clauses for main Option [insert selected main Option]",
+                    "input_type": "enum",
+                    "required": True,
+                    "section_ref": "doc-101-section-1",
+                    "extraction_hint": "Extract the selected main Option from CDP1.",
+                    "confidence": 0.86,
+                    "rationale": "The marker requests a selected main option.",
+                },
+                {
+                    "field_key": "cdp1.site_information_refs",
+                    "label": "Site Information document references",
+                    "part_ref": "A4.2 Option Selection",
+                    "filled_by": "project_office",
+                    "anchor_text": "The Site Information is in the following documents: [insert reference].",
+                    "input_type": "file_list",
+                    "required": True,
+                    "section_ref": "doc-101-section-1",
+                    "extraction_hint": "Extract all Site Information document references.",
+                    "confidence": 0.82,
+                    "rationale": "The marker asks the project office to insert document references.",
+                },
+            ]
+        }
     if "Pick the top 5 rules" in system_prompt or "top 5 rules" in system_prompt:
         return {
             "mappings": [
@@ -87,11 +119,31 @@ def test_template_mapping_vetting_flow_uses_only_approved_mappings(db: Session):
         db=db,
     )
     assert any(field.field_key == "cdp1.main_option" for field in fields)
-    assert any(field.field_key.startswith("cdp1.derived.") for field in fields)
-    assert len(fields) > 7
+    assert any(field.part_ref == "A4.2 Option Selection" for field in fields)
+    assert all(field.review_status == "suggested" for field in fields)
 
+    with pytest.raises(Exception):
+        workflow.verify_source_document(template_doc.id, db)
+
+    for field in fields:
+        workflow.update_template_field(
+            field.id,
+            schemas.TemplateFieldUpdate(review_status="approved"),
+            db,
+        )
     verified_template = workflow.verify_source_document(template_doc.id, db)
     assert verified_template["fields_approved"] == len(fields)
+
+    rule_source = workflow.create_source_document(
+        schemas.SourceDocumentCreate(
+            collection_id=collection.id,
+            doc_type="rulebook",
+            name="NEC ECC Practice Notes",
+            linked_document_id=101,
+        ),
+        db,
+    )
+    workflow.verify_source_document(rule_source.id, db)
 
     mapping_run = workflow.create_mapping_run(schemas.MappingRunCreate(collection_id=collection.id), db)
     assert mapping_run.status == "completed"
@@ -160,6 +212,36 @@ def test_rulebook_verify_marks_extracted_rules_reviewed(db: Session):
 
     assert response["rules_reviewed"] == 1
     assert rule.review_status == "reviewed"
+
+
+def test_document_markers_follow_source_document_role(db: Session):
+    collection = workflow.create_collection(schemas.CollectionCreate(name="Marker Roles"), db)
+    template_source = workflow.create_source_document(
+        schemas.SourceDocumentCreate(
+            collection_id=collection.id,
+            doc_type="template",
+            name="CDP1",
+            linked_document_id=101,
+        ),
+        db,
+    )
+
+    template_markers = main.get_document_markers(101, "auto", db)
+    assert any(marker.color == "blue" and "insert" in marker.text.lower() for marker in template_markers)
+
+    workflow.delete_source_document(template_source.id, db)
+    seed_rulebook_document(db)
+    workflow.create_source_document(
+        schemas.SourceDocumentCreate(
+            collection_id=collection.id,
+            doc_type="rulebook",
+            name="Practice Notes",
+            linked_document_id=101,
+        ),
+        db,
+    )
+    rule_markers = main.get_document_markers(101, "auto", db)
+    assert all(marker.color == "yellow" for marker in rule_markers)
 
 
 def test_delete_document_removes_history_and_linked_workflow_records(db: Session):
@@ -331,3 +413,85 @@ def seed_rulebook_document(db: Session) -> None:
         )
     )
     db.commit()
+
+
+def test_professionalization_workflow_is_document_scoped_and_audited(db: Session):
+    collection = workflow.create_collection(schemas.CollectionCreate(name="Professional Workspace"), db)
+    slots = workflow.list_library_slots(collection_id=collection.id, db=db)
+    assert len(slots) == 9
+    assert any(slot.required and slot.doc_type == "template" for slot in slots)
+
+    source = workflow.create_source_document(
+        schemas.SourceDocumentCreate(
+            collection_id=collection.id,
+            doc_type="rulebook",
+            name="Selected Rule Book",
+            linked_document_id=101,
+        ),
+        db,
+    )
+    confirmed = workflow.confirm_source_text(source.id, db)
+    assert confirmed.text_review_status == "verified"
+    assert len(confirmed.content_fingerprint) == 64
+
+    rule = db.query(models.Rule).filter(models.Rule.id == "rule-main-option").one()
+    rule.review_status = "rejected"
+    db.commit()
+    workflow.bulk_review_rules(source.id, schemas.RuleBulkReview(review_status="reviewed"), db)
+    db.refresh(rule)
+    assert rule.review_status == "rejected"
+
+    summary = workflow.get_dashboard_summary(collection_id=collection.id, db=db)
+    assert summary.total_documents == 1
+    assert summary.awaiting_text_review == 0
+    assert summary.recent_activity
+
+
+def test_approved_procedure_sets_are_immutable_and_cloneable(db: Session):
+    collection = workflow.create_collection(schemas.CollectionCreate(name="Procedure Workspace"), db)
+    draft = workflow.create_procedure_set(
+        schemas.ProcedureSetCreate(collection_id=collection.id, name="Tender Vetting Procedure"),
+        db,
+    )
+    approved = workflow.approve_procedure_set(draft.id, db)
+    assert approved.status == "approved"
+
+    with pytest.raises(Exception):
+        workflow.update_procedure_set(
+            approved.id,
+            schemas.ProcedureSetUpdate(name="Changed approved procedure"),
+            db,
+        )
+
+    clone = workflow.clone_procedure_set(approved.id, db)
+    assert clone.status == "draft"
+    assert clone.version == approved.version + 1
+    assert clone.parent_id == approved.id
+
+
+def test_audit_redaction_and_openapi_document_new_workflows():
+    snapshot = model_snapshot(
+        {
+            "llm_api_key": "secret",
+            "mineru_api_token": "secret",
+            "content": "large document body",
+            "name": "Visible",
+        }
+    )
+    assert snapshot["llm_api_key"] == "[redacted]"
+    assert snapshot["mineru_api_token"] == "[redacted]"
+    assert snapshot["content"] == "[redacted]"
+    assert snapshot["name"] == "Visible"
+
+    schema = main.app.openapi()
+    assert schema["info"]["title"] == "Tender Vetting API"
+    for path in [
+        "/api/library-slots",
+        "/api/source-documents/import-url",
+        "/api/source-documents/{source_document_id}/confirm-text",
+        "/api/mapping-runs",
+        "/api/procedure-sets/{procedure_id}/approve",
+        "/api/audit-events",
+        "/api/dashboard-summary",
+    ]:
+        assert path in schema["paths"]
