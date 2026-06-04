@@ -39,6 +39,7 @@ export function usePolling<T>({
       try {
         const result = await fetcherRef.current();
         failureCount = 0;
+        currentInterval = interval;
         if (!stopped) onResultRef.current(result);
       } catch (err) {
         failureCount++;
@@ -51,10 +52,9 @@ export function usePolling<T>({
       timer = window.setTimeout(async () => {
         await poll();
         if (!stopped) {
-          currentInterval = Math.min(
-            currentInterval * (failureCount > 0 ? 2 : 1),
-            maxInterval
-          );
+          currentInterval = failureCount > 0
+            ? Math.min(interval * (2 ** failureCount), maxInterval)
+            : interval;
           schedule();
         }
       }, currentInterval + jitter);

@@ -28,10 +28,35 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.detail ?? `Request failed with ${response.status}`);
+    throw new Error(formatErrorDetail(body.detail, response.status));
   }
   return response.json() as Promise<T>;
 }
+
+function formatErrorDetail(detail: unknown, status: number): string {
+  if (typeof detail === "string" && detail) return detail;
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && "msg" in item) return String(item.msg);
+        return "";
+      })
+      .filter(Boolean);
+    if (messages.length) return messages.join("; ");
+  }
+  return `Request failed with ${status}`;
+}
+
+export type TemplateFieldUpdate = Partial<Pick<TemplateField,
+  "label" | "anchor_text" | "input_type" | "required" | "section_ref" | "extraction_hint" |
+  "check_intent" | "structured_schema" | "normalization" | "evidence_locator" | "part_ref" |
+  "filled_by" | "confidence" | "rationale" | "source_window" | "review_status"
+>>;
+
+export type FieldRuleMappingUpdate = Partial<Pick<FieldRuleMapping,
+  "check_type" | "applicability_condition" | "confidence" | "rationale" | "review_status" | "review_notes"
+>>;
 
 export function createDocument(payload: {
   name: string;
@@ -247,7 +272,7 @@ export function createTemplateField(payload: Omit<TemplateField, "id" | "created
   });
 }
 
-export function updateTemplateField(id: string, data: Partial<TemplateField>) {
+export function updateTemplateField(id: string, data: TemplateFieldUpdate) {
   return request<TemplateField>(`/api/template-fields/${id}`, {
     method: "PUT",
     body: JSON.stringify(data)
@@ -283,7 +308,7 @@ export function getFieldRuleMappings(params?: { collection_id?: string; field_id
   return request<FieldRuleMapping[]>(`/api/field-rule-mappings${query ? `?${query}` : ""}`);
 }
 
-export function updateFieldRuleMapping(id: string, data: Partial<FieldRuleMapping>) {
+export function updateFieldRuleMapping(id: string, data: FieldRuleMappingUpdate) {
   return request<FieldRuleMapping>(`/api/field-rule-mappings/${id}`, {
     method: "PUT",
     body: JSON.stringify(data)

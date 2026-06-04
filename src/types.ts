@@ -138,7 +138,7 @@ export interface DocumentCollection {
   contract_family: string;
   jurisdiction: string;
   version: string;
-  status: DocumentStatus;
+  status: "active" | "archived";
   created_at?: string | null;
   updated_at?: string | null;
 }
@@ -218,7 +218,7 @@ export interface FieldRuleMapping {
 export interface MappingRun {
   id: string;
   collection_id: string;
-  status: DocumentStatus;
+  status: "created" | "running" | "completed" | "failed";
   llm_model: string;
   windows_total: number;
   windows_completed: number;

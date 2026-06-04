@@ -4,6 +4,7 @@ const STATUS_LABELS: Record<DocumentStatus, string> = {
   idle: "Idle",
   created: "Created",
   mineru_queued: "PDF Queued",
+  mineru_submitting: "Submitting PDF",
   mineru_processing: "Converting PDF",
   markdown_ready: "Text Ready",
   rule_extraction_queued: "Extracting Rules",

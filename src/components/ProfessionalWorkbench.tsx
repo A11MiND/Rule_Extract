@@ -63,6 +63,7 @@ import {
   updateSourceDocument,
   updateTemplateField
 } from "../api";
+import type { FieldRuleMappingUpdate, TemplateFieldUpdate } from "../api";
 import type { NavPage } from "./Sidebar";
 import type {
   AuditEvent,
@@ -140,7 +141,7 @@ export function ProfessionalWorkbench({ page, onPageChange, onOpenDocument }: Pr
 
   useEffect(() => {
     refresh().catch((error) => messageApi.error(error.message));
-  }, []);
+  }, [refresh]);
 
   async function runAction<T>(action: () => Promise<T>, success: string) {
     setBusy(true);
@@ -406,10 +407,11 @@ function Queue({ sources, linkedDocuments, onSelect, onOpenDocument }: { sources
   const [filter, setFilter] = useState("attention");
   const [active, setActive] = useState<SourceDocument | null>(sources.find((source) => RUNNING.has(source.status) || FAILED.has(source.status)) ?? sources[0] ?? null);
   useEffect(() => {
-    if (!active && sources.length) {
-      setActive(sources.find((source) => RUNNING.has(source.status) || FAILED.has(source.status) || source.text_review_status !== "verified") ?? sources[0]);
-    }
-  }, [active, sources]);
+    setActive((current) => {
+      const refreshed = sources.find((source) => source.id === current?.id);
+      return refreshed ?? sources.find((source) => RUNNING.has(source.status) || FAILED.has(source.status) || source.text_review_status !== "verified") ?? sources[0] ?? null;
+    });
+  }, [sources]);
   const filtered = sources.filter((source) => filter === "all" || (filter === "attention" && (RUNNING.has(source.status) || FAILED.has(source.status) || source.text_review_status !== "verified")) || (filter === "failed" && FAILED.has(source.status)) || (filter === "ready" && !RUNNING.has(source.status) && !FAILED.has(source.status)));
   const linked = active?.linked_document_id ? linkedDocuments.get(active.linked_document_id) : undefined;
   return (
@@ -456,7 +458,7 @@ function Queue({ sources, linkedDocuments, onSelect, onOpenDocument }: { sources
   );
 }
 
-function FieldsReview({ sources, fields, busy, onSelect, onSave, onApproveAll }: { sources: SourceDocument[]; fields: TemplateField[]; busy: boolean; onSelect: (field: TemplateField) => void; onSave: (field: TemplateField, data: Partial<TemplateField>) => void; onApproveAll: (source: SourceDocument) => void }) {
+function FieldsReview({ sources, fields, busy, onSelect, onSave, onApproveAll }: { sources: SourceDocument[]; fields: TemplateField[]; busy: boolean; onSelect: (field: TemplateField) => void; onSave: (field: TemplateField, data: TemplateFieldUpdate) => void; onApproveAll: (source: SourceDocument) => void }) {
   const [sourceId, setSourceId] = useState(sources[0]?.id ?? "");
   useEffect(() => { if (!sourceId && sources[0]) setSourceId(sources[0].id); }, [sources, sourceId]);
   const source = sources.find((item) => item.id === sourceId) ?? null;
@@ -499,7 +501,7 @@ function MappingWorkspace({
 }: {
   collectionId: string; sources: SourceDocument[]; fields: TemplateField[]; mappings: FieldRuleMapping[]; procedures: ProcedureSet[]; busy: boolean;
   onSuggest: (templateIds: string[], ruleIds: string[]) => void;
-  onSave: (mapping: FieldRuleMapping, data: Partial<FieldRuleMapping>) => void;
+  onSave: (mapping: FieldRuleMapping, data: FieldRuleMappingUpdate) => void;
   onDelete: (mapping: FieldRuleMapping) => void;
   onCreate: (payload: Omit<FieldRuleMapping, "id" | "field_label" | "rule_subject" | "created_at" | "updated_at">) => void;
   onCreateProcedure: (payload: Pick<ProcedureSet, "collection_id" | "name" | "template_source_ids" | "rule_source_ids" | "mapping_ids">) => void;
@@ -520,9 +522,13 @@ function MappingWorkspace({
     if (!templateIds.length && templates.length) setTemplateIds(templates.map((source) => source.id));
     if (!ruleIds.length && rulebooks.length) setRuleIds(rulebooks.map((source) => source.id));
   }, [rulebooks.length, templateIds.length, templates.length, ruleIds.length]);
+  const selectedRuleDocumentIds = rulebooks
+    .filter((source) => ruleIds.includes(source.id) && source.linked_document_id)
+    .map((source) => source.linked_document_id!)
+    .sort((a, b) => a - b);
   useEffect(() => {
-    Promise.all(rulebooks.filter((source) => ruleIds.includes(source.id) && source.linked_document_id).map((source) => getRules(source.linked_document_id!))).then((rows) => setRules(rows.flat())).catch(() => setRules([]));
-  }, [ruleIds.join(","), sources.length]);
+    Promise.all(selectedRuleDocumentIds.map((documentId) => getRules(documentId))).then((rows) => setRules(rows.flat())).catch(() => setRules([]));
+  }, [selectedRuleDocumentIds.join(",")]);
   useEffect(() => { if (!fieldId && approvedFields[0]) setFieldId(approvedFields[0].id); }, [approvedFields, fieldId]);
 
   return (

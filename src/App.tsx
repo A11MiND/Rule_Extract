@@ -137,7 +137,7 @@ export function App() {
     setDocumentJob(selected);
     previousStatusRef.current = selected.status;
     if (READY_STATUSES.has(selected.status)) refreshDocumentData(selected.id);
-  }, [documents, sourceDocuments]);
+  }, [documentJob?.id, documents, sourceDocuments]);
 
   // Poll document job status
   const isDocumentPolling = documentJob !== null && !TERMINAL_STATUSES.has(documentJob.status);
@@ -1107,6 +1107,7 @@ function RuleMap({
   const [selectedRule, setSelectedRule] = useState<Rule | null>(null);
   const [ruleDraft, setRuleDraft] = useState<Rule | null>(null);
   const [savingRuleId, setSavingRuleId] = useState<string | null>(null);
+  const [reviewError, setReviewError] = useState("");
   const [hoveredXrefCode, setHoveredXrefCode] = useState<string | null>(null);
   const prevRuleIdsRef = useRef<Set<string>>(new Set());
   const [newRuleIds, setNewRuleIds] = useState<Set<string>>(new Set());
@@ -1185,13 +1186,19 @@ function RuleMap({
 
   async function handleReviewAction(status: Rule["review_status"]) {
     if (!ruleDraft) return;
+    const previousDraft = ruleDraft;
     const nextDraft = { ...ruleDraft, review_status: status };
+    setReviewError("");
     setRuleDraft(nextDraft);
     try {
       const saved = await saveRule(nextDraft);
       onRulesChange(rules.map((r) => (r.id === saved.id ? saved : r)));
       setSelectedRule(saved);
-    } catch { /* keep draft state on error */ }
+      setRuleDraft(saved);
+    } catch (error) {
+      setRuleDraft(previousDraft);
+      setReviewError(error instanceof Error ? error.message : "Unable to update rule review status");
+    }
   }
 
   function openRuleForEdit(rule: Rule) {
@@ -1206,6 +1213,7 @@ function RuleMap({
 
   return (
     <section className="panel tall-panel">
+      {reviewError ? <Alert type="error" showIcon closable message={reviewError} onClose={() => setReviewError("")} /> : null}
       <div className="panel-title">
         <GitBranch size={20} />
         <h2>Rule Review</h2>
