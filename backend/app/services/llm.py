@@ -32,7 +32,7 @@ class LLMClient:
         if not self.api_key:
             raise LLMError("LLM API key is required for real rule extraction.")
         payload = self.build_chat_payload(system_prompt, user_prompt)
-        last_exc: Exception | None = None
+        last_error = "unknown transport error"
         for attempt in range(3):
             try:
                 response = requests.post(
@@ -41,16 +41,30 @@ class LLMClient:
                     json=payload,
                     timeout=120,
                 )
-                response.raise_for_status()
+            except requests.RequestException as exc:
+                last_error = f"network error ({type(exc).__name__})"
+                if attempt < 2:
+                    time.sleep((2 ** attempt) * (1.0 + random.random()))
+                    continue
+                raise LLMError(f"LLM request failed after 3 attempts: {last_error}") from exc
+
+            if response.status_code >= 500:
+                last_error = f"provider server error (HTTP {response.status_code})"
+                if attempt < 2:
+                    time.sleep((2 ** attempt) * (1.0 + random.random()))
+                    continue
+                raise LLMError(f"LLM request failed after 3 attempts: {last_error}")
+            if response.status_code >= 400:
+                raise LLMError(f"LLM request was rejected by the provider (HTTP {response.status_code}).")
+            try:
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
                 return parse_json_content(content)
-            except Exception as exc:
-                last_exc = exc
-                if attempt < 2:
-                    time.sleep((2 ** attempt) * (1.0 + random.random()))
-        msg = f"LLM request failed after 3 attempts: {last_exc}"
-        raise LLMError(msg) from last_exc
+            except LLMError:
+                raise
+            except (KeyError, IndexError, TypeError, ValueError) as exc:
+                raise LLMError("LLM provider returned an invalid response payload.") from exc
+        raise LLMError(f"LLM request failed after 3 attempts: {last_error}")
 
     def build_chat_payload(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
         payload = {

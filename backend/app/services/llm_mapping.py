@@ -7,7 +7,7 @@ import uuid
 from sqlalchemy.orm import Session
 
 from .. import models
-from ..runtime_config import get_runtime_config
+from ..runtime_config import effective_llm_key, get_runtime_config
 from .llm import LLMClient, LLMError
 
 
@@ -144,7 +144,12 @@ def llm_rank_mappings(field: models.TemplateField, candidates: list[models.Rule]
     if not candidates:
         return []
     config = get_runtime_config()
-    client = LLMClient(api_key=config.llm_api_key, model=config.llm_model)
+    client = LLMClient(
+        api_base=config.llm_api_base,
+        api_key=effective_llm_key(config),
+        model=config.llm_model,
+        provider=config.llm_provider,
+    )
     candidates_payload = [
         {
             "rule_id": r.id,

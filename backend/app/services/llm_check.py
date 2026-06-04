@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .. import models
-from ..runtime_config import get_runtime_config
+from ..runtime_config import effective_llm_key, get_runtime_config
 from .llm import LLMClient, LLMError
 
 
@@ -28,7 +28,12 @@ def evaluate_result(
             f"No tender evidence was found for optional field '{field.label}'.",
         )
     config = get_runtime_config()
-    client = LLMClient(api_key=config.llm_api_key, model=config.llm_model)
+    client = LLMClient(
+        api_base=config.llm_api_base,
+        api_key=effective_llm_key(config),
+        model=config.llm_model,
+        provider=config.llm_provider,
+    )
     rule_subject = rule.subject if rule else "(no rule linked)"
     rule_condition = (rule.condition if rule else "") or "(none)"
     rule_action = (rule.action if rule else "") or "(none)"

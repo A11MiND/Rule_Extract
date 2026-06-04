@@ -5,7 +5,7 @@ import json
 from sqlalchemy.orm import Session
 
 from .. import models
-from ..runtime_config import get_runtime_config
+from ..runtime_config import effective_llm_key, get_runtime_config
 from .llm import LLMClient, LLMError
 
 
@@ -40,7 +40,12 @@ def extract_evidence_value(
     if not sections:
         return "", "", 0.0, False
     config = get_runtime_config()
-    client = LLMClient(api_key=config.llm_api_key, model=config.llm_model)
+    client = LLMClient(
+        api_base=config.llm_api_base,
+        api_key=effective_llm_key(config),
+        model=config.llm_model,
+        provider=config.llm_provider,
+    )
     sections_payload = [
         {"title": title, "content": content[:1500]} for title, content in sections[:80]
     ]
